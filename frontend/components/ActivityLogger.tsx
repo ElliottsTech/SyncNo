@@ -3,7 +3,7 @@ import { useEffect, useRef } from 'react';
 import { useSession } from 'next-auth/react';
 
 const API = '/api';
-const ANALYTICS_URL = 'https://syncno.elliotts.tech:3003/api/ping';
+const ANALYTICS_URL = 'https://syncno.elliotts.tech/dashboard/api/ping';
 
 function getOrCreateInstallId(): string {
   const key = 'syncno_install_id';
@@ -39,7 +39,11 @@ function sendAnalyticsPing() {
   });
 
   // Use sendBeacon for reliability
-  navigator.sendBeacon(`${ANALYTICS_URL}?${params.toString()}`);
+  fetch(`${ANALYTICS_URL}?${params.toString()}`, {
+    method: 'POST',
+    keepalive: true,
+    headers: { 'Content-Type': 'text/plain' },
+  }).catch(() => {});
 }
 
 function parseBrowser(ua: string) {

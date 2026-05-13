@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3002:3002"
+    volumes:
+      - sqlite-data:/app/data
+      - /root/SyncNo/SyncNo:/root/SyncNo/SyncNo:ro
+      - ./.env:/app/.env:ro
+    environment:
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      NEXT_PUBLIC_API_URL: http://localhost:3002/api
+      SYNCRO_API_KEY: ${SYNCRO_API_KEY}
+      SYNCRO_SUBDOMAIN: ${SYNCRO_SUBDOMAIN}
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://syncno.elliotts.tech/api
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: "3001"
+      HOSTNAME: "0.0.0.0"
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      NEXT_PUBLIC_API_URL: https://syncno.elliotts.tech/api
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET}
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID}
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  sqlite-data:

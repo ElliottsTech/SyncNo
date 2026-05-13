@@ -1,0 +1,12 @@
+node_modules/
+.next/
+backend/data/*.db
+backend/data/*.db-wal
+backend/data/*.db-shm
+*.log
+*.tsbuildinfo
+node_modules
+.env
+.env.local
+.env.production
+SyncNo/*

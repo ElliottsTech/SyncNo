@@ -1,0 +1,106 @@
+'use client';
+import { useState, useEffect } from 'react';
+import { useParams } from 'next/navigation';
+import Link from 'next/link';
+import Badge from '../../../components/Badge';
+import RawJsonView from '../../../components/RawJsonView';
+
+const API = '/api';
+
+export default function PurchaseOrderDetail() {
+  const { id } = useParams();
+  const [po, setPo] = useState<any>(null);
+
+  useEffect(() => {
+    fetch(`${API}/purchase-orders/${id}`)
+      .then(r => r.json())
+      .then(setPo);
+  }, [id]);
+
+  if (!po) return <p className="text-gray-500">Loading...</p>;
+
+  const lineItems = Array.isArray(po.line_items) ? po.line_items : [];
+  const vendor = typeof po.vendor === 'object' ? po.vendor : null;
+
+  return (
+    <div className="max-w-7xl mx-auto">
+      <Link href="/purchase-orders" className="text-blue-600 hover:underline text-sm">← Back to Purchase Orders</Link>
+
+      <div className="mt-4 bg-white rounded border">
+        <div className="p-6 border-b">
+          <div className="flex items-start gap-3">
+            <input
+              type="checkbox"
+              checked={!!po.synced}
+              onChange={async (e) => {
+                await fetch(`${API}/sync/synced`, {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ table: 'purchase_orders', id: po.id, synced: !po.synced }),
+                });
+                const res = await fetch(`${API}/purchase-orders/${id}`).then(r => r.json());
+                setPo(res);
+              }}
+              className="w-5 h-5 cursor-pointer mt-1"
+              title={po.synced ? 'Synced — click to force re-sync' : 'Not synced'}
+            />
+            <div className="flex-1">
+              <h1 className="text-xl font-bold">PO #{po.number}</h1>
+              {vendor && <p className="text-gray-500 mt-1">Vendor: {vendor.name}</p>}
+            </div>
+            <Badge>{po.status}</Badge>
+          </div>
+        </div>
+
+        <div className="p-6 grid grid-cols-2 gap-6">
+          <div>
+            <h3 className="font-semibold mb-2">Details</h3>
+            <p><span className="text-gray-500">Created:</span> {po.created_at ? new Date(po.created_at).toLocaleDateString() : ''}</p>
+            <p><span className="text-gray-500">Due:</span> {po.due_date ? new Date(po.due_date).toLocaleDateString() : ''}</p>
+            <p><span className="text-gray-500">Paid:</span> {po.paid_date ? new Date(po.paid_date).toLocaleDateString() : 'N/A'}</p>
+            <p className="text-lg font-semibold mt-2">Total: {po.total}</p>
+          </div>
+          {vendor && (
+            <div>
+              <h3 className="font-semibold mb-2">Vendor Contact</h3>
+              <p>{vendor.name}</p>
+              <p>{vendor.rep_first_name} {vendor.rep_last_name}</p>
+              <p>{vendor.email}</p>
+              <p>{vendor.phone}</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {lineItems.length > 0 && (
+        <div className="mt-6">
+          <h2 className="text-lg font-semibold mb-3">Line Items</h2>
+          <div className="bg-white rounded border overflow-hidden">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cost</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Total</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {lineItems.map((item: any, i: number) => (
+                  <tr key={i}>
+                    <td className="px-4 py-3 text-sm">{item.product_name || item.description || item.name || `Item ${i + 1}`}</td>
+                    <td className="px-4 py-3 text-sm">{item.quantity || 1}</td>
+                    <td className="px-4 py-3 text-sm">${item.cost || item.price || 0}</td>
+                    <td className="px-4 py-3 text-sm">${((item.quantity || 1) * (item.cost || item.price || 0)).toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <RawJsonView rawJson={po.raw_json} label="Purchase Order Raw JSON" />
+    </div>
+  );
+}
