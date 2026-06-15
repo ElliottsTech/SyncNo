@@ -4,13 +4,17 @@ import Link from 'next/link';
 import SyncTerminal from '@/components/SyncTerminal';
 import type { HttpLogEntry } from '@/components/SyncTerminal';
 
-const API = '/api';
+// Sync API calls go directly to backend, bypassing NextAuth proxy
+// Use backend port so auth middleware doesn't block status checks
+const API = (typeof window !== 'undefined' && window.location.port === '3001')
+  ? 'http://localhost:3002/api'  // local Docker: browser→frontend:3001 but sync→backend:3002
+  : '/api';  // fallback: use proxy (auth required)
 
 type Phase = 'customers' | 'contacts' | 'tickets' | 'invoices' | 'assets' | 'estimates' | 'purchase_orders' | 'vendors';
 
 type PhaseProgress = {
   phase: Phase;
-  status: 'started' | 'done' | 'error' | 'cancelled';
+  status: 'started' | 'done' | 'error' | 'cancelled' | 'conflict' | 'resuming' | 'building_catalog';
   count?: number;
   error?: string;
   message?: string;
@@ -31,8 +35,9 @@ const PHASE_LABELS: Record<Phase, string> = {
 
 type ActiveSync = {
   phase: Phase | 'all';
-  xhr: XMLHttpRequest;
+  xhr: XMLHttpRequest | null;
   buffer: string;
+  storedEvents: string[];  // SSE event lines persisted to sessionStorage
 };
 
 export default function SyncroPage() {
@@ -62,32 +67,125 @@ export default function SyncroPage() {
   // Prevent duplicate in-flight syncs
   const syncsInFlight = useRef<Set<string>>(new Set());
 
-  // Restore active syncs from sessionStorage on mount — reconnect to any in-progress syncs
+  // Polling interval ref for background sync state
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Check backend sync state on mount — do NOT auto-start a new sync
   useEffect(() => {
     fetchStatus();
-    try {
-      const stored = sessionStorage.getItem('activeSyncs');
-      if (stored) {
-        const parsed = JSON.parse(stored) as string[];
-        if (parsed.length > 0) {
-          // Reconnect each active sync by re-triggering it
-          parsed.forEach((key: string) => {
-            const [, phase] = key.split(':');
-            if (phase === 'all') {
-              // Small delay to let fetchStatus complete first
-              setTimeout(() => handleSyncAll(false), 100);
-            } else if (phase) {
-              setTimeout(() => handleSyncEntity(phase as Phase), 100);
-            }
-          });
+    fetch(`${API}/sync/progress`)
+      .then(r => r.json())
+      .then(data => {
+        // Check if any entity has a non-idle phase
+        const states = [data.tickets, data.customers, data.contacts, data.invoices, data.assets, data.estimates, data.purchase_orders, data.vendors];
+        const anyRunning = states.some(s => s && s.phase && s.phase !== 'idle' && s.phase !== 'error');
+
+        if (anyRunning) {
+          // Sync is running on backend — show its state, do NOT restart
+          // Restore syncAllProgress from sessionStorage (survives refresh),
+          // then overlay with fresh backend state for accuracy
+          const storedProgress = loadSyncProgress();
+          const backendProgress = {
+            tickets: buildProgressFromState('tickets', data.tickets),
+            customers: buildProgressFromState('customers', data.customers),
+            contacts: buildProgressFromState('contacts', data.contacts),
+            invoices: buildProgressFromState('invoices', data.invoices),
+            assets: buildProgressFromState('assets', data.assets),
+            estimates: buildProgressFromState('estimates', data.estimates),
+            purchase_orders: buildProgressFromState('purchase_orders', data.purchase_orders),
+            vendors: buildProgressFromState('vendors', data.vendors),
+          };
+          // Prefer sessionStorage progress if available, otherwise use backend state (never null)
+          const mergedProgress = storedProgress || backendProgress;
+          setSyncAllProgress(mergedProgress);
+          saveSyncProgress(mergedProgress);
+          setSyncAllSyncing(true);
+          // Restore buffered SSE events from sessionStorage so View Terminal works
+          const storedEventsRaw = sessionStorage.getItem('syncEvents:entity:all');
+          const storedEvents: string[] = storedEventsRaw ? JSON.parse(storedEventsRaw) : [];
+          setActiveSyncs({ 'entity:all': { phase: 'all', xhr: null, buffer: '', storedEvents } });
+          const savedKey = loadActiveSyncKey();
+          if (savedKey && savedKey.startsWith('entity:')) setSelectedSyncKey(savedKey);
+          // Start polling immediately to keep UI updated (SSE won't reconnect without user action)
+          startProgressPolling();
+          return;
         }
-      }
-    } catch (_) {}
+        // Nothing running on backend
+        syncsInFlight.current.clear();
+        sessionStorage.removeItem('activeSyncs');
+        setSyncAllSyncing(false);
+        setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null });
+      })
+      .catch(() => {
+        syncsInFlight.current.clear();
+        sessionStorage.removeItem('activeSyncs');
+      });
   }, []);
 
-  function saveActiveSyncs(syncs: Record<string, ActiveSync>) {
+  function buildProgressFromState(phase: Phase, state: any): PhaseProgress {
+    if (!state || state.phase === 'idle' || state.phase === 'error') return null;
+    const p: PhaseProgress = { phase: phase as Phase, status: 'started' };
+    if (state.phase === 'catalog') {
+      p.message = `catalog page ${state.last_page_synced || 0}/${state.total_pages || '?'}`;
+    } else if (state.phase === 'detail') {
+      p.message = `detail ${state.detail_synced || 0}/${state.detail_total || 0}`;
+    } else if (state.phase === 'error') {
+      p.status = 'error';
+      p.error = 'error';
+    }
+    return p;
+  }
+
+  function startProgressPolling() {
+    if (pollIntervalRef.current) return;
+    pollIntervalRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`${API}/sync/progress`);
+        const data = await res.json();
+        const states = [data.tickets, data.customers, data.contacts, data.invoices, data.assets, data.estimates, data.purchase_orders, data.vendors];
+        const anyRunning = states.some(s => s && s.phase && s.phase !== 'idle' && s.phase !== 'error');
+        if (!anyRunning) {
+          clearInterval(pollIntervalRef.current!);
+          pollIntervalRef.current = null;
+          setSyncAllSyncing(false);
+          setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null });
+          setActiveSyncs({});
+          fetchStatus();
+          return;
+        }
+        setSyncAllProgress({
+          tickets: buildProgressFromState('tickets', data.tickets),
+          customers: buildProgressFromState('customers', data.customers),
+          contacts: buildProgressFromState('contacts', data.contacts),
+          invoices: buildProgressFromState('invoices', data.invoices),
+          assets: buildProgressFromState('assets', data.assets),
+          estimates: buildProgressFromState('estimates', data.estimates),
+          purchase_orders: buildProgressFromState('purchase_orders', data.purchase_orders),
+          vendors: buildProgressFromState('vendors', data.vendors),
+        });
+      } catch (_) {}
+    }, 3000);
+  }
+
+  function saveActiveSyncs(syncs: Record<string, ActiveSync>, selectedKey: string | null) {
     const keys = Object.keys(syncs);
     sessionStorage.setItem('activeSyncs', JSON.stringify(keys));
+    if (selectedKey) sessionStorage.setItem('activeSyncKey', selectedKey);
+  }
+
+  function loadActiveSyncKey(): string | null {
+    return sessionStorage.getItem('activeSyncKey');
+  }
+
+  function saveSyncProgress(progress: Record<string, any>) {
+    sessionStorage.setItem('syncProgress', JSON.stringify(progress));
+  }
+
+  function loadSyncProgress(): Record<Phase, PhaseProgress | null> | null {
+    try {
+      const raw = sessionStorage.getItem('syncProgress');
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
   }
 
   function fetchStatus() {
@@ -117,13 +215,16 @@ export default function SyncroPage() {
       if (sync) {
         // Tell backend to abort, then abort the XHR
         fetch(`${API}/sync/trigger`, { method: 'DELETE' }).catch(() => {});
-        sync.xhr.abort();
+        sync.xhr?.abort();
       }
       const next = { ...prev };
       delete next[key];
-      saveActiveSyncs(next);
+      const newSelectedKey = selectedSyncKey === key ? (Object.keys(next)[0] || null) : selectedSyncKey;
+      saveActiveSyncs(next, newSelectedKey);
       return next;
     });
+    sessionStorage.removeItem(`syncEvents:${key}`);
+    sessionStorage.removeItem('syncProgress');
     if (selectedSyncKey === key) setSelectedSyncKey(null);
   }
 
@@ -168,42 +269,78 @@ export default function SyncroPage() {
 
   function handleSyncAllProgress(data: any) {
     // Deduplicate SSE events
-    const eventKey = `${data.phase || ''}:${data.status || ''}:${data.current || ''}:${data.count || ''}:${data.error || ''}`;
+    const eventKey = `${data.phase || ''}:${data.status || ''}:${data.subphase || ''}:${data.current || ''}:${data.count || ''}:${data.error || ''}`;
     if (lastEventRef.current['all'] === eventKey) return;
     lastEventRef.current['all'] = eventKey;
 
     if (data.type === 'cancelled' || data.status === 'cancelled') {
       setSyncAllSyncing(false);
-      setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null });
+      const next = { customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null };
+      setSyncAllProgress(next);
+      sessionStorage.removeItem('syncProgress');
+      if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
       return;
     }
     if (data.phase === 'done' || data.phase === 'error') {
       setSyncAllSyncing(false);
+      sessionStorage.removeItem('syncProgress');
+      if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
       fetchStatus();
       return;
     }
-    if (data.status === 'progress' && data.phase) {
-      setSyncAllProgress(prev => ({
-        ...prev,
-        [data.phase]: {
-          phase: data.phase,
-          status: 'started',
-          message: `${data.current}/${data.total}`,
-        },
-      }));
+
+    // Progress update
+    if (data.phase && data.status === 'progress') {
+      const phase = data.phase as Phase;
+      let message = '';
+      if (phase === 'tickets' && data.subphase === 'catalog') {
+        message = `catalog page ${data.page}/${data.totalPages}`;
+      } else if (phase === 'tickets' && data.subphase === 'detail') {
+        message = `detail ${data.current}/${data.total}`;
+      } else {
+        message = `${data.current}/${data.total}`;
+      }
+      setSyncAllProgress(prev => {
+        const next = { ...prev, [phase]: { phase, status: 'started', message } };
+        saveSyncProgress(next);
+        return next;
+      });
       return;
     }
+
+    // Phase started/done/error
     if (data.phase && data.status) {
-      setSyncAllProgress(prev => ({
-        ...prev,
-        [data.phase]: {
-          phase: data.phase,
-          status: data.status,
-          count: data.count,
-          error: data.error,
-          message: data.message,
-        },
-      }));
+      const phase = data.phase as Phase;
+      if (phase === 'tickets' && data.status === 'catalog_done') {
+        setSyncAllProgress(prev => {
+          const next = { ...prev, tickets: { phase: 'tickets' as Phase, status: 'started' as const, message: `catalog done, ${data.detailTotal} to fetch` } };
+          saveSyncProgress(next);
+          return next;
+        });
+        return;
+      }
+      if (phase === 'tickets' && data.status === 'building_catalog') {
+        setSyncAllProgress(prev => {
+          const next = { ...prev, tickets: { phase: 'tickets' as Phase, status: 'started' as const, message: data.message || `catalog page ${data.resumePage}/?` } };
+          saveSyncProgress(next);
+          return next;
+        });
+        return;
+      }
+      setSyncAllProgress(prev => {
+        const next = {
+          ...prev,
+          [phase]: {
+            phase,
+            status: data.status === 'done' ? 'done' : data.status === 'error' ? 'error' : 'started',
+            count: data.count,
+            error: data.error,
+            message: data.message || (data.count != null ? `${data.count}` : ''),
+          },
+        };
+        saveSyncProgress(next);
+        return next;
+      });
     }
   }
 
@@ -213,16 +350,16 @@ export default function SyncroPage() {
     if (syncsInFlight.current.has(key)) return; // prevent duplicate
     syncsInFlight.current.add(key);
     let buffer = '';
+    let storedEvents: string[] = [];
 
     const xhr = new XMLHttpRequest();
-    const url = `${API}/sync/trigger?phase=${phase}${limit ? `&limit=${limit}` : ''}${forceAll ? '&forceAll=true' : ''}`;
+    const url = `${API}/sync/trigger${forceAll ? '?forceAll=true' : ''}`;
     xhr.open('POST', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
 
-    setActiveSyncs(prev => {
-      const next = { ...prev, [key]: { phase, xhr, buffer } };
-      saveActiveSyncs(next);
-      return next;
-    });
+    const next = { [key]: { phase, xhr, buffer, storedEvents } };
+    setActiveSyncs(next);
+    saveActiveSyncs(next, key);
     setSelectedSyncKey(key);
     setEntityStatus(prev => ({ ...prev, [phase]: { phase, status: 'started', message: 'Starting...' } }));
 
@@ -235,11 +372,13 @@ export default function SyncroPage() {
           try {
             const data = JSON.parse(line.slice(6));
             handleEntityProgress(phase, data);
+            storedEvents = [...storedEvents, line].slice(-500);
+            sessionStorage.setItem(`syncEvents:${key}`, JSON.stringify(storedEvents));
           } catch (_) {}
         }
       }
       // Update buffer in state
-      setActiveSyncs(prev => prev[key] ? { ...prev, [key]: { ...prev[key], buffer } } : prev);
+      setActiveSyncs(prev => prev[key] ? { ...prev, [key]: { ...prev[key], buffer, storedEvents } } : prev);
     };
 
     xhr.onload = () => {
@@ -247,9 +386,11 @@ export default function SyncroPage() {
       setActiveSyncs(prev => {
         const next = { ...prev };
         delete next[key];
-        saveActiveSyncs(next);
+        const newSelectedKey = selectedSyncKey === key ? (Object.keys(next)[0] || null) : selectedSyncKey;
+        saveActiveSyncs(next, newSelectedKey);
         return next;
       });
+      sessionStorage.removeItem(`syncEvents:${key}`);
       setEntityStatus(prev => ({ ...prev, [phase]: { phase, status: 'done', count: prev[phase]?.count || 0 } }));
       if (selectedSyncKey === key) setSelectedSyncKey(null);
       fetchStatus();
@@ -259,14 +400,16 @@ export default function SyncroPage() {
       setActiveSyncs(prev => {
         const next = { ...prev };
         delete next[key];
-        saveActiveSyncs(next);
+        const newSelectedKey = selectedSyncKey === key ? (Object.keys(next)[0] || null) : selectedSyncKey;
+        saveActiveSyncs(next, newSelectedKey);
         return next;
       });
+      sessionStorage.removeItem(`syncEvents:${key}`);
       setEntityStatus(prev => ({ ...prev, [phase]: { phase, status: 'error', error: 'Network error' } }));
       if (selectedSyncKey === key) setSelectedSyncKey(null);
       fetchStatus();
     };
-    xhr.send('');
+    xhr.send(JSON.stringify({ entity: phase, limit }));
   }
 
   // Sync All
@@ -275,15 +418,15 @@ export default function SyncroPage() {
     if (syncsInFlight.current.has(key)) return;
     syncsInFlight.current.add(key);
     let buffer = '';
+    let storedEvents: string[] = [];
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API}/sync/trigger${forceAll ? '?forceAll=true' : ''}`, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
 
-    setActiveSyncs(prev => {
-      const next = { ...prev, [key]: { phase: 'all' as const, xhr, buffer } };
-      saveActiveSyncs(next);
-      return next;
-    });
+    const next = { [key]: { phase: 'all' as const, xhr, buffer, storedEvents } };
+    setActiveSyncs(next);
+    saveActiveSyncs(next, key);
     setSelectedSyncKey(key);
     setSyncAllSyncing(true);
     setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null });
@@ -297,20 +440,41 @@ export default function SyncroPage() {
           try {
             const data = JSON.parse(line.slice(6));
             handleSyncAllProgress(data);
+            // Persist SSE events to sessionStorage for cross-navigation recovery
+            storedEvents = [...storedEvents, line].slice(-500);
+            sessionStorage.setItem(`syncEvents:${key}`, JSON.stringify(storedEvents));
           } catch (_) {}
         }
       }
-      setActiveSyncs(prev => prev[key] ? { ...prev, [key]: { ...prev[key], buffer } } : prev);
+      setActiveSyncs(prev => prev[key] ? { ...prev, [key]: { ...prev[key], buffer, storedEvents } } : prev);
     };
 
     xhr.onload = () => {
       syncsInFlight.current.delete(key);
+      if (xhr.status === 409) {
+        // Sync already running — poll progress endpoint
+        const err = JSON.parse(xhr.responseText);
+        setSyncAllProgress(prev => ({
+          ...prev,
+          tickets: {
+            phase: 'tickets',
+            status: 'conflict',
+            message: `Sync already running (${err.phase || 'unknown'})`,
+          },
+        }));
+        setSyncAllSyncing(true);
+        startProgressPolling();
+        return;
+      }
       setActiveSyncs(prev => {
         const next = { ...prev };
         delete next[key];
-        saveActiveSyncs(next);
+        const newSelectedKey = selectedSyncKey === key ? (Object.keys(next)[0] || null) : selectedSyncKey;
+        saveActiveSyncs(next, newSelectedKey);
         return next;
       });
+      sessionStorage.removeItem(`syncEvents:${key}`);
+      if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
       setSyncAllSyncing(false);
       if (selectedSyncKey === key) setSelectedSyncKey(null);
       fetchStatus();
@@ -320,13 +484,16 @@ export default function SyncroPage() {
       setActiveSyncs(prev => {
         const next = { ...prev };
         delete next[key];
-        saveActiveSyncs(next);
+        const newSelectedKey = selectedSyncKey === key ? (Object.keys(next)[0] || null) : selectedSyncKey;
+        saveActiveSyncs(next, newSelectedKey);
         return next;
       });
+      sessionStorage.removeItem(`syncEvents:${key}`);
+      sessionStorage.removeItem('syncProgress');
       setSyncAllSyncing(false);
       if (selectedSyncKey === key) setSelectedSyncKey(null);
     };
-    xhr.send('');
+    xhr.send(JSON.stringify({ entity: 'all' }));
   }
 
   function phaseIcon(p: PhaseProgress | null) {
@@ -334,6 +501,8 @@ export default function SyncroPage() {
     if (p.status === 'done') return '✓';
     if (p.status === 'error') return '✗';
     if (p.status === 'cancelled') return '⊘';
+    if (p.status === 'conflict') return '⚠';
+    if (p.status === 'resuming' || p.status === 'building_catalog') return '◐';
     return '◐';
   }
 
@@ -342,6 +511,8 @@ export default function SyncroPage() {
     if (p.status === 'done') return 'text-green-600';
     if (p.status === 'error') return 'text-red-600';
     if (p.status === 'cancelled') return 'text-orange-600';
+    if (p.status === 'conflict') return 'text-red-600 font-bold';
+    if (p.status === 'resuming' || p.status === 'building_catalog') return 'text-blue-600';
     return 'text-blue-600';
   }
 
@@ -519,9 +690,23 @@ export default function SyncroPage() {
                     View Terminal
                   </button>
                 )}
+                <button
+                  onClick={async () => {
+                    if (!confirm('Reset all ticket sync state? This clears in-progress flags so a new sync can start.')) return;
+                    const res = await fetch(`${API}/sync/reset`, { method: 'POST' });
+                    const data = await res.json();
+                    if (data.ok) {
+                      setSyncAllProgress(prev => ({ ...prev, tickets: null }));
+                      fetchStatus();
+                    }
+                  }}
+                  className="bg-red-600 text-white px-3 py-1 rounded text-xs hover:bg-red-700"
+                >
+                  Reset Sync State
+                </button>
               </div>
 
-              {activeSyncs['entity:all'] && (
+              {(activeSyncs['entity:all'] || syncAllSyncing) && (
                 <div className="mt-3 space-y-1">
                   {ENTITY_PHASES.map(phase => (
                     <div key={phase} className={`flex items-center gap-2 text-sm ${phaseColor(syncAllProgress[phase])}`}>
@@ -586,6 +771,8 @@ export default function SyncroPage() {
             onClose={() => setSelectedSyncKey(null)}
             xhr={sync.xhr}
             bufferRef={{ current: sync.buffer }}
+            storedEvents={sync.storedEvents}
+            apiUrl={API}
           />
         ) : null
       ))}

@@ -90,7 +90,9 @@ CREATE TABLE IF NOT EXISTS tickets (
   comments TEXT,
   user TEXT,
   raw_json TEXT,
-  synced INTEGER DEFAULT 0
+  synced INTEGER DEFAULT 0,
+  has_detail INTEGER DEFAULT 0,
+  synced_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS assets (
@@ -331,3 +333,35 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS sync_state (
+  entity TEXT PRIMARY KEY,
+  phase TEXT DEFAULT 'idle',
+  total_pages INTEGER DEFAULT 0,
+  last_page_synced INTEGER DEFAULT 0,
+  detail_cursor TEXT DEFAULT NULL,
+  detail_total INTEGER DEFAULT 0,
+  detail_synced INTEGER DEFAULT 0,
+  last_sync TEXT,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS sync_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity TEXT,
+  phase TEXT,
+  status TEXT,
+  message TEXT,
+  error TEXT,
+  current INTEGER,
+  total INTEGER,
+  subphase TEXT,
+  detail_total INTEGER,
+  detail_synced INTEGER,
+  current_ticket_id TEXT,
+  current_ticket_number TEXT,
+  count INTEGER,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_events_created ON sync_events(created_at);

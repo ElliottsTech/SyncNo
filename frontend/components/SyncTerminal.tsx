@@ -15,13 +15,20 @@ export type HttpLogEntry = {
 type LogLine = {
   id: number;
   ts: string;
-  method: string;
-  url: string;
-  status: number;
-  phase: string;
-  duration_ms: number;
-  body_preview: string;
+  method?: string;
+  url?: string;
+  status?: number;
+  phase?: string;
+  duration_ms?: number;
+  body_preview?: string;
   color: string;
+  // Non-http_log fields
+  type?: string;
+  current?: number;
+  total?: number;
+  message?: string;
+  error?: string;
+  count?: number;
 };
 
 function statusColor(status: number): string {
@@ -55,70 +62,154 @@ function phaseTag(phase: string): string {
 
 interface SyncTerminalProps {
   onClose: () => void;
-  xhr: XMLHttpRequest | null;
-  bufferRef: React.MutableRefObject<string>;
+  xhr?: XMLHttpRequest | null;
+  bufferRef?: React.MutableRefObject<string>;
+  storedEvents?: string[];
+  apiUrl?: string;
 }
 
-export default function SyncTerminal({ onClose, xhr, bufferRef }: SyncTerminalProps) {
+export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/api' }: SyncTerminalProps) {
+  const API = apiUrl;
   const [lines, setLines] = useState<LogLine[]>([]);
   const [isPaused, setIsPaused] = useState(false);
+  const [pollCount, setPollCount] = useState(0);
+  const [debugInfo, setDebugInfo] = useState<string[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const idRef = useRef(0);
   const seenUrls = useRef<Set<string>>(new Set());
+  const lastEventIdRef = useRef<number>(0);
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Keep addEventLine ref current so interval always calls latest version
+  const addEventLineRef = useRef<(data: any) => void>(() => {});
+  const pollCountRef = useRef(0);
 
+  function debug(msg: string) {
+    setDebugInfo(prev => [...prev.slice(-4), `${new Date().toISOString().slice(11, 19)} ${msg}`]);
+  }
+
+  // Restore lines from storedEvents on mount (handles both old SSE string format and new DB object format)
   useEffect(() => {
-    if (!xhr) return;
-
-    const handleProgress = () => {
-      if (isPaused) return;
-      const bufferedLen = bufferRef.current.length;
-      const newData = xhr.responseText.slice(bufferedLen);
-      bufferRef.current = xhr.responseText;
-
-      const chunks = newData.split('\n');
-      for (const chunk of chunks) {
-        if (!chunk.startsWith('data: ')) continue;
+    debug(`restore: storedEvents.length=${storedEvents.length}`);
+    if (storedEvents.length > 0) {
+      let processed = 0;
+      for (const event of storedEvents) {
         try {
-          const data = JSON.parse(chunk.slice(6)) as HttpLogEntry;
-          if (data.type !== 'http_log') continue;
-          // Deduplicate by URL — prevents double-rendering same event from dual XHR
-          const urlKey = `${data.method}:${data.url}:${data.status}:${data.duration_ms}`;
-          if (seenUrls.current.has(urlKey)) continue;
-          seenUrls.current.add(urlKey);
-          idRef.current++;
-          setLines(prev => {
-            const ts = new Date().toISOString().split('T')[1].slice(0, 12);
-            const color = statusColor(data.status);
-            const newLine: LogLine = {
-              id: idRef.current,
-              ts,
-              method: data.method,
-              url: data.url,
-              status: data.status,
-              phase: data.phase,
-              duration_ms: data.duration_ms,
-              body_preview: data.body_preview,
-              color,
-            };
-            const next = [...prev, newLine];
-            // Keep max 2000 lines to avoid memory bloat
-            if (next.length > 2000) return next.slice(-1500);
-            return next;
-          });
-        } catch (_) {}
+          let data: any;
+          if (typeof event === 'string') {
+            // Old SSE format: "data: {...}"
+            const jsonStr = event.replace(/^data: /, '');
+            data = JSON.parse(jsonStr);
+          } else {
+            data = Array.isArray(event) ? event[0] : event;
+          }
+          if (!data || !data.id) { debug(`restore: skip no-id event`); continue; }
+          if (data.id <= lastEventIdRef.current) { debug(`restore: skip id=${data.id} <= lastId=${lastEventIdRef.current}`); continue; }
+          lastEventIdRef.current = data.id;
+          addEventLine(data);
+          processed++;
+        } catch (e: any) { debug(`restore: err ${e.message}`); }
       }
+      debug(`restore: processed ${processed}, lastId=${lastEventIdRef.current}`);
+    }
+  }, []);
+
+  // Poll GET /sync/events for live updates
+  useEffect(() => {
+    if (isPaused) {
+      if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
+      return;
+    }
+
+    pollIntervalRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`${API}/sync/events`);
+        if (!res.ok) { debug(`poll HTTP ${res.status}`); return; }
+        const contentType = res.headers.get('content-type');
+        if (!contentType?.includes('json')) { debug(`poll content-type: ${contentType}`); return; }
+        let events;
+        try { events = await res.json(); }
+        catch(e: any) { debug(`poll json err: ${e.message}`); return; }
+        if (!Array.isArray(events)) { debug(`poll events not array: ${typeof events}`); return; }
+        pollCountRef.current++;
+        setPollCount(pollCountRef.current);
+        let added = 0;
+        for (const data of events) {
+          if (data.id <= lastEventIdRef.current) continue;
+          lastEventIdRef.current = data.id;
+          addEventLineRef.current(data);
+          added++;
+        }
+        if (added > 0) debug(`poll #${pollCountRef.current}: +${added} events, hiId=${lastEventIdRef.current}`);
+      } catch (e: any) { debug(`poll err: ${e.message}`); }
+    }, 1000);
+
+    return () => {
+      if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
     };
+  }, [isPaused]);
 
-    xhr.addEventListener('progress', handleProgress);
-    return () => xhr.removeEventListener('progress', handleProgress);
-  }, [xhr, isPaused, bufferRef]);
-
+  // Auto-scroll to bottom
   useEffect(() => {
     if (!isPaused) {
       bottomRef.current?.scrollIntoView({ behavior: 'auto' });
     }
   }, [lines, isPaused]);
+
+  const addEventLine = (data: any) => {
+    idRef.current++;
+    const tsRaw = data.created_at ? data.created_at.split('T')[1] : null;
+    const ts = tsRaw ? tsRaw.slice(0, 12) : new Date().toISOString().split('T')[1].slice(0, 12);
+
+    if (data.type === 'http_log') {
+      const urlKey = `${data.method}:${data.url}:${data.status}:${data.duration_ms}`;
+      if (seenUrls.current.has(urlKey)) return;
+      seenUrls.current.add(urlKey);
+      setLines(prev => {
+        const next = [...prev, {
+          id: idRef.current,
+          ts,
+          method: data.method,
+          url: data.url,
+          status: data.status,
+          phase: data.phase,
+          duration_ms: data.duration_ms,
+          body_preview: data.body_preview,
+          color: statusColor(data.status),
+        }];
+        return next.length > 2000 ? next.slice(-1500) : next;
+      });
+    } else {
+      const phase = data.phase || '';
+      const phaseColor: Record<string, string> = {
+        customers: 'text-blue-400',
+        contacts: 'text-purple-400',
+        tickets: 'text-green-400',
+        invoices: 'text-yellow-400',
+        assets: 'text-orange-400',
+        estimates: 'text-pink-400',
+        purchase_orders: 'text-cyan-400',
+        vendors: 'text-gray-400',
+      };
+      setLines(prev => {
+        const next = [...prev, {
+          id: idRef.current,
+          ts,
+          phase,
+          color: phaseColor[phase] || 'text-gray-400',
+          type: data.status || data.type,
+          current: data.current,
+          total: data.total,
+          message: data.message,
+          error: data.error,
+          count: data.count,
+        }];
+        return next.length > 2000 ? next.slice(-1500) : next;
+      });
+    }
+  };
+  // Keep ref current so interval always calls latest addEventLine
+  addEventLineRef.current = addEventLine;
 
   const phaseColor = (phase: string) => {
     const colors: Record<string, string> = {
@@ -148,7 +239,7 @@ export default function SyncTerminal({ onClose, xhr, bufferRef }: SyncTerminalPr
             <span className="text-gray-400 text-sm ml-2 font-mono">sync-terminal — live HTTP stream</span>
           </div>
           <div className="flex items-center gap-3">
-            <span className="text-gray-500 text-xs">{lines.length} requests</span>
+            <span className="text-gray-500 text-xs" title="Poll count (resets on mount)">{lines.length} lines · poll #{pollCount}</span>
             <button
               onClick={() => setIsPaused(p => !p)}
               className="text-xs px-2 py-1 rounded border border-[#30363d] text-gray-400 hover:text-white hover:border-gray-500"
@@ -175,29 +266,55 @@ export default function SyncTerminal({ onClose, xhr, bufferRef }: SyncTerminalPr
           ref={containerRef}
           className="flex-1 overflow-y-auto p-4 font-mono text-sm"
         >
-          {lines.length === 0 && (
+          {debugInfo.length > 0 && (
+            <div className="text-yellow-500 text-xs mb-2 border border-yellow-900 rounded p-1">
+              {debugInfo.map((d, i) => <div key={i}>{d}</div>)}
+            </div>
+          )}
+          {lines.length === 0 && storedEvents.length === 0 && (
             <div className="text-gray-500">Waiting for HTTP requests...</div>
+          )}
+          {lines.length === 0 && storedEvents.length > 0 && (
+            <div className="text-gray-500">Restoring events...</div>
           )}
           {lines.map(line => (
             <div key={line.id} className="flex flex-col gap-0.5 mb-2 group">
               {/* Line header: timestamp method status phase duration */}
               <div className="flex items-center gap-3">
                 <span className="text-gray-600 text-xs shrink-0">{line.ts}</span>
-                <span className={`text-xs font-bold shrink-0 ${line.method === 'GET' ? 'text-cyan-400' : 'text-yellow-400'}`}>
-                  {line.method}
+                {line.method ? (
+                  <>
+                    <span className={`text-xs font-bold shrink-0 ${line.method === 'GET' ? 'text-cyan-400' : 'text-yellow-400'}`}>
+                      {line.method}
+                    </span>
+                    <span className={`text-xs font-bold shrink-0 ${line.color}`}>
+                      {line.status}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className={`text-xs font-bold shrink-0 ${line.color}`}>
+                      {line.type || line.phase}
+                    </span>
+                  </>
+                )}
+                <span className={`text-xs shrink-0 ${phaseColor(line.phase || '')}`}>
+                  [{line.phase || '—'}]
                 </span>
-                <span className={`text-xs font-bold shrink-0 ${line.color}`}>
-                  {line.status}
-                </span>
-                <span className={`text-xs shrink-0 ${phaseColor(line.phase)}`}>
-                  [{line.phase}]
-                </span>
-                <span className="text-gray-600 text-xs shrink-0">
-                  {line.duration_ms}ms
-                </span>
-                <span className="text-gray-400 text-xs truncate">
-                  {truncateUrl(line.url)}
-                </span>
+                {line.method ? (
+                  <span className="text-gray-600 text-xs shrink-0">
+                    {line.duration_ms}ms
+                  </span>
+                ) : (
+                  <span className="text-gray-400 text-xs shrink-0 truncate">
+                    {line.message || (line.current != null ? `${line.current}/${line.total}` : line.count != null ? `count: ${line.count}` : line.error || '')}
+                  </span>
+                )}
+                {line.url && (
+                  <span className="text-gray-400 text-xs truncate">
+                    {truncateUrl(line.url)}
+                  </span>
+                )}
               </div>
               {/* Body preview */}
               {line.body_preview && (

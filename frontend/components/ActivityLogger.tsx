@@ -3,7 +3,7 @@ import { useEffect, useRef } from 'react';
 import { useSession } from 'next-auth/react';
 
 const API = '/api';
-const ANALYTICS_URL = 'https://syncno.elliotts.tech/dashboard/api/ping';
+const ANALYTICS_URL = 'https://syncno.elliotts.tech:3003/dashboard/api/ping';
 
 function getOrCreateInstallId(): string {
   const key = 'syncno_install_id';

@@ -5,13 +5,22 @@ import path from 'path';
 
 const router = Router();
 
-// Env var fallbacks for credentials (DB settings take precedence if set)
+// In-memory abort controller for cancelling running sync
+const syncAbort = { current: null };
+
+function getSyncAbortController() {
+  if (!syncAbort.current) {
+    syncAbort.current = new AbortController();
+  }
+  return syncAbort.current;
+}
+
+// ─── Settings helpers ─────────────────────────────────────────────────────────
+
 function getSetting(key) {
-  // Check env first (key is like "syncro_api_key" → "SYNCRO_API_KEY")
   const envKey = key.toUpperCase();
   const envVal = process.env[envKey];
   if (envVal) return envVal;
-  // Fall back to DB
   const db = getDb();
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
   return row ? row.value : null;
@@ -22,20 +31,82 @@ function setSetting(key, value) {
   db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
 }
 
-function emit(sse, data) {
-  sse.write(`data: ${JSON.stringify(data)}\n\n`);
+// ─── Sync state helpers ───────────────────────────────────────────────────────
+
+function getSyncState(entity) {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM sync_state WHERE entity = ?').get(entity);
+  if (!row) {
+    db.prepare('INSERT INTO sync_state (entity) VALUES (?)').run(entity);
+    return db.prepare('SELECT * FROM sync_state WHERE entity = ?').get(entity);
+  }
+  return row;
 }
 
-function logSync(db, action, details) {
+function saveSyncState(state) {
+  const db = getDb();
+  db.prepare(`
+    UPDATE sync_state SET
+      phase = ?,
+      total_pages = ?,
+      last_page_synced = ?,
+      detail_cursor = ?,
+      detail_total = ?,
+      detail_synced = ?,
+      last_sync = ?,
+      updated_at = datetime('now')
+    WHERE entity = ?
+  `).run(
+    state.phase,
+    state.total_pages,
+    state.last_page_synced,
+    state.detail_cursor,
+    state.detail_total,
+    state.detail_synced,
+    state.last_sync,
+    state.entity
+  );
+}
+
+// ─── Event helpers ──────────────────────────────────────────────────────────
+
+let liveClients = [];
+
+function emitEvent(data) {
+  // Write to DB for polling clients
   try {
-    db.prepare(`INSERT INTO logs (action, details, ip_address) VALUES (?, ?, ?)`)
-      .run(action, details, null);
-  } catch (e) {
-    // Ignore logging errors
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO sync_events (entity, phase, status, message, error, current, total, subphase, detail_total, detail_synced, current_ticket_id, current_ticket_number, count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      data.phase || null,
+      data.phase || null,
+      data.status || null,
+      data.message || null,
+      data.error || null,
+      data.current || null,
+      data.total || null,
+      data.subphase || null,
+      data.detailTotal || null,
+      data.detailSynced || null,
+      data.currentTicketId || null,
+      data.currentTicketNumber || null,
+      data.count || null
+    );
+  } catch (e) { console.error('emitEvent error:', e.message); }
+
+  // Also push to live SSE clients for http_log events
+  if (data.type === 'http_log' && liveClients.length > 0) {
+    const payload = `data: ${JSON.stringify(data)}\n\n`;
+    for (const client of liveClients) {
+      try { client.write(payload); } catch (_) {}
+    }
   }
 }
 
-// GET /api/sync/status
+// ─── API: Status ──────────────────────────────────────────────────────────────
+
 router.get('/status', (req, res) => {
   const apiKey = getSetting('syncro_api_key');
   const subdomain = getSetting('syncro_subdomain');
@@ -63,7 +134,44 @@ router.get('/status', (req, res) => {
   });
 });
 
-// POST /api/sync/save - save credentials
+// ─── API: Progress (polling) ───────────────────────────────────────────────────
+
+router.get('/progress', (req, res) => {
+  const db = getDb();
+  const ticketState = getSyncState('tickets');
+  const customerState = getSyncState('customers');
+  const contactState = getSyncState('contacts');
+  const invoiceState = getSyncState('invoices');
+  const assetState = getSyncState('assets');
+  const estimateState = getSyncState('estimates');
+  const poState = getSyncState('purchase_orders');
+  const vendorState = getSyncState('vendors');
+
+  res.json({
+    tickets: ticketState,
+    customers: customerState,
+    contacts: contactState,
+    invoices: invoiceState,
+    assets: assetState,
+    estimates: estimateState,
+    purchase_orders: poState,
+    vendors: vendorState,
+  });
+});
+
+// ─── API: Sync events stream (polling fallback) ─────────────────────────────────
+
+router.get('/events', (req, res) => {
+  const db = getDb();
+  const since = req.query.since || '1970-01-01';
+  const events = db.prepare(`
+    SELECT * FROM sync_events WHERE created_at > ? ORDER BY id DESC LIMIT 500
+  `).all(since);
+  res.json(events.reverse()); // reverse to ASC for client
+});
+
+// ─── API: Save credentials ─────────────────────────────────────────────────────
+
 router.post('/save', (req, res) => {
   const { apiKey, subdomain } = req.body;
   if (!apiKey || !subdomain) {
@@ -72,7 +180,6 @@ router.post('/save', (req, res) => {
   setSetting('syncro_api_key', apiKey);
   setSetting('syncro_subdomain', subdomain);
 
-  // Also persist to backend/.env
   try {
     const envPath = path.resolve(process.cwd(), '.env');
     let envContent = fs.readFileSync(envPath, 'utf8');
@@ -90,7 +197,8 @@ router.post('/save', (req, res) => {
   res.json({ success: true });
 });
 
-// POST /api/sync/preview - count records newer than local max updated_at
+// ─── API: Preview ─────────────────────────────────────────────────────────────
+
 router.post('/preview', async (req, res) => {
   const apiKey = getSetting('syncro_api_key');
   const subdomain = getSetting('syncro_subdomain');
@@ -115,7 +223,6 @@ router.post('/preview', async (req, res) => {
     errors: [],
   };
 
-  // Fetch page 1 and count records newer than lastSync
   async function countNewer(endpoint) {
     if (!lastSync) return null;
     const url = new URL(`${baseUrl}/${endpoint}`);
@@ -154,44 +261,79 @@ router.post('/preview', async (req, res) => {
   res.json(preview);
 });
 
-// POST /api/sync/trigger - streaming sync with progress
-// Optional ?phase= query param to sync a single entity only
+// ─── API: Trigger ─────────────────────────────────────────────────────────────
+
 router.post('/trigger', async (req, res) => {
-  const reqId = Math.random().toString(36).slice(2, 10);
+  const { entity } = req.body; // 'tickets', 'customers', etc. defaults to 'all'
+  const forceAll = req.query.forceAll === 'true';
 
   const apiKey = getSetting('syncro_api_key');
   const subdomain = getSetting('syncro_subdomain');
-  const singlePhase = req.query.phase || null;
-  const limit = singlePhase ? (parseInt(req.query.limit) || null) : null;
-  const forceAll = req.query.forceAll === 'true';
-  const localMax = forceAll ? null : (getSetting('last_sync') || null);
 
   if (!apiKey || !subdomain) {
     return res.status(400).json({ error: 'Syncro not configured' });
   }
 
-  // Streaming SSE response
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders();
+  // Reset abort controller for new sync
+  syncAbort.current = null;
 
-  // Abort flag — set via DELETE /api/sync/trigger
-  res.aborted = false;
-  res.on('close', () => { res.aborted = true; });
+  // Check if this entity is already running
+  const ALL_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors'];
+  const entitiesToRun = entity && entity !== 'all'
+    ? [entity]
+    : ALL_ENTITIES;
+
+  for (const ent of entitiesToRun) {
+    const state = getSyncState(ent);
+    if (state.phase !== 'idle' && state.phase !== 'error') {
+      return res.status(409).json({
+        error: `Sync for ${ent} already in progress`,
+        entity: ent,
+        phase: state.phase,
+      });
+    }
+  }
+
+  // SSE response — writeHead sets status + headers atomically, no separate flush
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+
+  // Track this response for http_log streaming
+  liveClients.push(res);
 
   const db = getDb();
-  const results = { customers: 0, contacts: 0, tickets: 0, invoices: 0, assets: 0, estimates: 0, purchase_orders: 0, vendors: 0, ticket_comments: 0, ticket_time_entries: 0, ticket_line_items: 0, errors: [] };
-  const startTime = Date.now();
+  const log = (action, details) => {
+    try {
+      db.prepare(`INSERT INTO logs (action, details, ip_address) VALUES (?, ?, ?)`)
+        .run(action, details, null);
+    } catch (_) {}
+  };
 
-  const ALL_PHASES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors'];
-  const phasesToRun = singlePhase ? [singlePhase] : ALL_PHASES;
+  log('SYNC_START', `Sync triggered for: ${entitiesToRun.join(', ')}, forceAll: ${forceAll}`);
+
+  // Send 202 acknowledgment as SSE event (stream stays open for subsequent events)
+  res.write(`data: ${JSON.stringify({ accepted: true, entities: entitiesToRun })}\n\n`);
+
+  // Run sync in next tick (non-blocking)
+  setImmediate(() => runSync(entitiesToRun, forceAll, apiKey, subdomain));
+});
+
+// ─── Sync runner (runs detached from HTTP response) ───────────────────────────
+
+async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
+  const db = getDb();
+  const results = {};
+  const startTime = Date.now();
+  const abortCtrl = getSyncAbortController();
+  const syncSignal = abortCtrl.signal;
 
   const headers = {
     'Authorization': `Bearer ${apiKey}`,
     'Content-Type': 'application/json',
   };
-
   const baseUrl = `https://${subdomain}.syncromsp.com/api/v1`;
 
   const log = (action, details) => {
@@ -201,11 +343,8 @@ router.post('/trigger', async (req, res) => {
     } catch (_) {}
   };
 
-  log('SYNC_REQ', `New sync request ${reqId} — phase: ${req.query.phase || 'all'}`);
+  // ─── Shared helpers ─────────────────────────────────────────────────────────
 
-  log('SYNC_START', `Sync started — forceAll: ${forceAll}, last_sync: ${localMax}`);
-
-  // Fetch paginated list, filtering by updated_at > localMax
   class ApiError extends Error {
     constructor(endpoint, pageOrId, status, body) {
       super(`${endpoint} ${pageOrId} failed ${status}`);
@@ -216,792 +355,772 @@ router.post('/trigger', async (req, res) => {
     }
   }
 
-  async function fetchList(endpoint, localMax, maxRecords, phase, forceAll) {
-    const all = [];
-    let page = 1;
-    let totalPages = 1;
-    let latestUpdatedAt = localMax;
-    let fetchSeq = 0; // per-sync unique fetch counter
-
-    while (page <= totalPages) {
-      const url = new URL(`${baseUrl}/${endpoint}`);
-      url.searchParams.set('page', page);
-      url.searchParams.set('per_page', 100);
-      if (maxRecords) url.searchParams.set('per_page', Math.min(maxRecords, 100));
-
-      const reqUrl = url.toString();
-      const seq = ++fetchSeq;
-      const start = Date.now();
-      log('FETCH', `${reqId} #${seq} → GET ${reqUrl}`);
-      const resp = await fetch(reqUrl, { headers, signal: AbortSignal.timeout(30000) });
-      const ms = Date.now() - start;
-      let data;
-      let respBody = '';
-      if (resp.status === 429) {
-        rateLimitHits++;
-        log('SYNC_RATE_LIMIT', `429 hit on ${endpoint} page ${page} — total hits: ${rateLimitHits}`);
-        emit(res, {
-          type: 'http_log',
-          direction: 'response',
-          method: 'GET',
-          url: reqUrl,
-          status: 429,
-          phase,
-          duration_ms: ms,
-          body_preview: '',
-        });
-        await new Promise(r => setTimeout(r, 65000));
-        const retryStart = Date.now();
-        const retry = await fetch(reqUrl, { headers, signal: AbortSignal.timeout(30000) });
-        const retryMs = Date.now() - retryStart;
-        try { respBody = await retry.clone().text(); } catch (_) {}
-        emit(res, {
-          type: 'http_log',
-          direction: 'response',
-          method: 'GET',
-          url: reqUrl,
-          status: retry.status,
-          phase,
-          duration_ms: retryMs,
-          body_preview: respBody.slice(0, 300),
-        });
-        if (!retry.ok) {
-          try { respBody = await retry.clone().text(); } catch (_) {}
-          throw new ApiError(endpoint, `page ${page}`, retry.status, respBody);
-        }
-        data = await retry.json();
-      } else if (!resp.ok) {
-        try { respBody = await resp.clone().text(); } catch (_) {}
-        emit(res, {
-          type: 'http_log',
-          direction: 'response',
-          method: 'GET',
-          url: reqUrl,
-          status: resp.status,
-          phase,
-          duration_ms: ms,
-          body_preview: respBody.slice(0, 300),
-        });
-        throw new ApiError(endpoint, `page ${page}`, resp.status, respBody);
-      } else {
-        try { respBody = await resp.clone().text(); } catch (_) {}
-        emit(res, {
-          type: 'http_log',
-          direction: 'response',
-          method: 'GET',
-          url: reqUrl,
-          status: resp.status,
-          phase,
-          duration_ms: ms,
-          body_preview: respBody.slice(0, 300),
-        });
-        data = await resp.json();
-      }
-      const items = data.customers || data.contacts || data.tickets || data.invoices || data.assets || data.estimates || data.purchase_orders || [];
-      const meta = data.meta || {};
-      totalPages = meta.total_pages || 1;
-
-      const filtered = items.filter(item => {
-        if (forceAll) return true;
-        if (!item.updated_at) return true;
-        if (!localMax) return true;
-        return item.updated_at > localMax;
-      });
-
-      for (const item of filtered) {
-        if (item.updated_at && item.updated_at > latestUpdatedAt) {
-          latestUpdatedAt = item.updated_at;
-        }
-      }
-
-      all.push(...filtered);
-      if (maxRecords && all.length >= maxRecords) {
-        all.splice(maxRecords);
-        emit(res, { phase: null, type: 'progress', endpoint, page, totalPages, fetched: filtered.length, limited: true });
-        break; // break while loop — maxRecords reached
-      }
-
-      emit(res, { phase: null, type: 'progress', endpoint, page, totalPages, fetched: filtered.length });
-      if (items.length === 0) break;
-      if (res.aborted) { emit(res, { type: 'cancelled' }); return { records: all, latestUpdatedAt }; }
-      page++;
-      await new Promise(r => setTimeout(r, 600));
-    }
-
-    return { records: all, latestUpdatedAt };
-  }
-
-  // Fetch single item detail — unwrap {ticket:{...}} → {...}
-  // Track rate limit hits for logging
   let rateLimitHits = 0;
 
-  async function fetchDetail(endpoint, id, phase) {
-    const reqUrl = `${baseUrl}/${endpoint}/${id}`;
+  async function fetchWithRetry(url, phase) {
     const start = Date.now();
-    const resp = await fetch(reqUrl, { headers, signal: AbortSignal.timeout(30000) });
+    const combinedSignal = AbortSignal.any([syncSignal, AbortSignal.timeout(30000)]);
+    const resp = await fetch(url, { headers, signal: combinedSignal });
     const ms = Date.now() - start;
+
     let body = '';
     try { body = await resp.clone().text(); } catch (_) {}
-    // Emit raw HTTP log
-    emit(res, {
+
+    emitEvent( {
       type: 'http_log',
       direction: 'response',
       method: 'GET',
-      url: reqUrl,
+      url,
       status: resp.status,
       phase,
       duration_ms: ms,
       body_preview: body.slice(0, 300),
     });
-    // Detect rate limit (429) — back off and log
+
     if (resp.status === 429) {
       rateLimitHits++;
-      log('SYNC_RATE_LIMIT', `429 hit on ${endpoint}/${id} — total hits: ${rateLimitHits}`);
-      // Wait 65s then retry once
+      log('SYNC_RATE_LIMIT', `429 hit on ${url} — total hits: ${rateLimitHits}`);
       await new Promise(r => setTimeout(r, 65000));
-      const retryStart = Date.now();
-      const retry = await fetch(reqUrl, { headers, signal: AbortSignal.timeout(30000) });
-      const retryMs = Date.now() - retryStart;
+      const retry = await fetch(url, { headers, signal: combinedSignal });
       let retryBody = '';
       try { retryBody = await retry.clone().text(); } catch (_) {}
-      emit(res, {
+      emitEvent( {
         type: 'http_log',
         direction: 'response',
         method: 'GET',
-        url: reqUrl,
+        url,
         status: retry.status,
         phase,
-        duration_ms: retryMs,
+        duration_ms: Date.now() - start,
         body_preview: retryBody.slice(0, 300),
       });
-      if (!retry.ok) throw new ApiError(endpoint, String(id), retry.status, retryBody);
-      const data = await retry.json();
-      return data.ticket || data.customer || data.contact || data.invoice || data.asset || data.estimate || data.purchase_order || data.vendor || data;
+      if (!retry.ok) throw new ApiError(url, 'retry', retry.status, retryBody);
+      return { resp: retry, body: retryBody };
     }
-    if (!resp.ok) throw new ApiError(endpoint, String(id), resp.status, body);
-    const data = await resp.json();
-    // Syncro wraps single-entity detail in a key: {ticket:{...}}, {customer:{...}}, etc.
-    return data.ticket || data.customer || data.contact || data.invoice || data.asset || data.estimate || data.purchase_order || data.vendor || data;
+
+    if (!resp.ok) throw new ApiError(url, 'page', resp.status, body);
+    return { resp, body };
   }
 
-  try {
-    if (singlePhase && !ALL_PHASES.includes(singlePhase)) {
-      emit(res, { phase: 'error', error: `Unknown phase: ${singlePhase}` });
-      res.end();
-      return;
+  async function fetchJson(url, phase) {
+    const { resp, body } = await fetchWithRetry(url, phase);
+    return JSON.parse(body);
+  }
+
+  function checkAbort() {
+    if (syncSignal.aborted) throw new Error('Sync cancelled');
+  }
+
+  // ─── Ticket sync ─────────────────────────────────────────────────────────────
+
+  async function syncTickets() {
+    const state = getSyncState('tickets');
+
+    const isInitialSync = !state.last_sync || forceAll;
+
+    // ── Catalog phase ─────────────────────────────────────────────────────────
+    state.phase = 'catalog';
+    saveSyncState(state);
+    emitEvent( { phase: 'tickets', status: 'started', subphase: 'catalog', message: 'Building ticket catalog...' });
+
+    try {
+      let totalPages = state.total_pages || 0;
+      let lastPageSynced = state.last_page_synced || 0;
+      let startPage = 1;
+
+      if (lastPageSynced > 0 && !forceAll) {
+        // Resume: continue from last page + 1
+        startPage = lastPageSynced + 1;
+      } else if (forceAll) {
+        // Force all: clear has_detail on all tickets, start fresh
+        db.prepare('UPDATE tickets SET has_detail = 0, synced_at = NULL').run();
+        lastPageSynced = 0;
+        startPage = 1;
+        totalPages = 0;
+      }
+
+      // If we don't know total pages yet, fetch page 1
+      if (totalPages === 0) {
+        const data = await fetchJson(`${baseUrl}/tickets?page=1&per_page=100`, 'tickets_catalog');
+        const tickets = data.tickets || [];
+        totalPages = data.meta?.total_pages || 1;
+
+        const insertMany = db.transaction((ticketList) => {
+          for (const t of ticketList) {
+            db.prepare(`
+              INSERT OR REPLACE INTO tickets (id, number, subject, status, created_at, updated_at, raw_json, has_detail, synced_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
+            `).run(
+              t.id,
+              String(t.number || ''),
+              t.subject || '',
+              t.status || '',
+              t.created_at || '',
+              t.updated_at || '',
+              JSON.stringify(t)
+            );
+          }
+        });
+        insertMany(tickets);
+
+        state.total_pages = totalPages;
+        state.last_page_synced = 1;
+        saveSyncState(state);
+        emitEvent( { phase: 'tickets', status: 'progress', subphase: 'catalog', page: 1, totalPages, fetched: tickets.length });
+
+        if (totalPages === 1 || startPage >= totalPages) {
+          return finishCatalog(state, isInitialSync);
+        }
+        startPage = 2;
+      }
+
+      // Fetch remaining pages
+      for (let page = startPage; page <= totalPages; page++) {
+        const data = await fetchJson(`${baseUrl}/tickets?page=${page}&per_page=100`, 'tickets_catalog');
+        const tickets = data.tickets || [];
+
+        // Handle page growth
+        if (data.meta?.total_pages > totalPages) {
+          totalPages = data.meta.total_pages;
+        }
+
+        const insertMany = db.transaction((ticketList) => {
+          for (const t of ticketList) {
+            db.prepare(`
+              INSERT OR REPLACE INTO tickets (id, number, subject, status, created_at, updated_at, raw_json, has_detail, synced_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT has_detail FROM tickets WHERE id = ?), 0), datetime('now'))
+            `).run(
+              t.id,
+              String(t.number || ''),
+              t.subject || '',
+              t.status || '',
+              t.created_at || '',
+              t.updated_at || '',
+              JSON.stringify(t),
+              t.id
+            );
+          }
+        });
+        insertMany(tickets);
+
+        state.total_pages = totalPages;
+        state.last_page_synced = page;
+        saveSyncState(state);
+        emitEvent( { phase: 'tickets', status: 'progress', subphase: 'catalog', page, totalPages, fetched: tickets.length });
+
+        await new Promise(r => setTimeout(r, 600));
+      }
+
+      await finishCatalog(state, isInitialSync);
+
+    } catch (e) {
+      state.phase = 'error';
+      saveSyncState(state);
+      emitEvent( { phase: 'tickets', status: 'error', error: e.message });
+      throw e;
     }
+  }
 
-    let globalLatest = localMax;
+  async function finishCatalog(state, isInitialSync) {
+    // Compute detail_total
+    const row = db.prepare("SELECT COUNT(*) as cnt FROM tickets WHERE has_detail = 0").get();
+    state.detail_total = row.cnt;
+    state.detail_cursor = null;
+    state.detail_synced = 0;
+    state.phase = 'detail';
+    state.last_sync = new Date().toISOString();
+    saveSyncState(state);
+    emitEvent( { phase: 'tickets', status: 'catalog_done', detailTotal: state.detail_total });
 
-    function updateGlobalLatest(ts) {
-      if (ts && ts > (globalLatest || '')) globalLatest = ts;
+    // ── Detail phase ─────────────────────────────────────────────────────────
+    await syncTicketDetails(state, isInitialSync);
+  }
+
+  async function syncTicketDetails(state, isInitialSync) {
+    emitEvent( { phase: 'tickets', status: 'started', subphase: 'detail', message: 'Fetching ticket details...' });
+
+    try {
+      let total = state.detail_total;
+      let synced = state.detail_synced;
+      let cursor = state.detail_cursor;
+
+      // Build query - select tickets without detail
+      let query, params;
+      if (!cursor) {
+        query = "SELECT id, status FROM tickets WHERE has_detail = 0 ORDER BY id ASC";
+        params = [];
+      } else {
+        query = "SELECT id, status FROM tickets WHERE has_detail = 0 AND id > ? ORDER BY id ASC";
+        params = [cursor];
+      }
+
+      let tickets = db.prepare(query).all(...params);
+
+      // If total is 0 but we're in detail phase, recalculate
+      if (tickets.length === 0 && total > 0) {
+        // All done
+        state.phase = 'idle';
+        state.detail_cursor = null;
+        state.detail_synced = 0;
+        saveSyncState(state);
+        emitEvent( { phase: 'tickets', status: 'done', count: synced });
+        return;
+      }
+
+      // Recalculate total if needed
+      if (total === 0) {
+        const row = db.prepare("SELECT COUNT(*) as cnt FROM tickets WHERE has_detail = 0").get();
+        total = row.cnt;
+        state.detail_total = total;
+        saveSyncState(state);
+      }
+
+      for (const ticket of tickets) {
+        checkAbort();
+        const detailData = await fetchJson(`${baseUrl}/tickets/${ticket.id}`, 'tickets_detail');
+        const detail = detailData.ticket || detailData;
+
+        // Update ticket with full detail
+        db.prepare(`
+          UPDATE tickets
+          SET raw_json = ?, has_detail = 1, synced_at = datetime('now'), updated_at = ?,
+              subject = ?, status = ?, number = ?, customer_id = ?, customer_business_then_name = ?,
+              due_date = ?, resolved_at = ?, start_at = ?, end_at = ?, location_id = ?,
+              problem_type = ?, ticket_type_id = ?, user_id = ?, pdf_url = ?, priority = ?,
+              comments = ?, user = ?
+          WHERE id = ?
+        `).run(
+          JSON.stringify(detail),
+          detail.updated_at || '',
+          detail.subject || '',
+          detail.status || '',
+          String(detail.number || ''),
+          detail.customer_id,
+          detail.customer_business_then_name || '',
+          detail.due_date || '',
+          detail.resolved_at || '',
+          detail.start_at || '',
+          detail.end_at || '',
+          detail.location_id || '',
+          detail.problem_type || '',
+          detail.ticket_type_id || '',
+          detail.user_id || '',
+          detail.pdf_url || '',
+          detail.priority || '',
+          JSON.stringify(detail.comments || []),
+          detail.user ? JSON.stringify(detail.user) : '',
+          detail.id
+        );
+
+        // Store child entities
+        const comments = detail.comments || [];
+        for (const c of comments) {
+          db.prepare(`INSERT OR REPLACE INTO ticket_comments (id, ticket_id, body, tech, user_id, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(c.id, detail.id, c.body || '', c.tech || c.user || c.author || '', c.user_id || '', c.created_at || '', c.updated_at || '', JSON.stringify(c));
+        }
+
+        const timers = detail.ticket_timers || [];
+        for (const te of timers) {
+          db.prepare(`INSERT OR REPLACE INTO ticket_time_entries (id, ticket_id, user_id, start_time, end_time, recorded, billable, notes, active_duration, product_id, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(te.id, detail.id, te.user_id || '', te.start_time || '', te.end_time || '', te.recorded ? 1 : 0, te.billable ? 1 : 0, te.notes || '', te.active_duration || 0, te.product_id || '', te.created_at || '', te.updated_at || '', JSON.stringify(te));
+        }
+
+        const lineItems = detail.line_items || [];
+        for (const li of lineItems) {
+          db.prepare(`INSERT OR REPLACE INTO ticket_line_items (id, ticket_id, product_id, quantity, price, description, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(li.id, detail.id, li.product_id || '', parseFloat(li.quantity) || 0, parseFloat(li.retail_cents) / 100 || parseFloat(li.price) || 0, li.description || li.name || '', li.created_at || '', li.updated_at || '', JSON.stringify(li));
+        }
+
+        state.detail_cursor = String(detail.id);
+        state.detail_synced = synced + 1;
+        saveSyncState(state);
+
+        synced++;
+        emitEvent( {
+          phase: 'tickets',
+          status: 'progress',
+          subphase: 'detail',
+          current: synced,
+          total,
+          currentTicketId: detail.id,
+          currentTicketNumber: detail.number,
+        });
+
+        await new Promise(r => setTimeout(r, 350));
+        checkAbort();
+      }
+
+      // Done
+      state.phase = 'idle';
+      state.detail_cursor = null;
+      state.detail_synced = 0;
+      saveSyncState(state);
+      results.tickets = synced;
+      log('SYNC_ENTITY', `Tickets detail: ${synced} fetched`);
+      emitEvent( { phase: 'tickets', status: 'done', count: synced });
+
+    } catch (e) {
+      state.phase = 'error';
+      saveSyncState(state);
+      emitEvent( { phase: 'tickets', status: 'error', error: e.message });
+      throw e;
     }
+  }
 
-    // ── CUSTOMERS ──────────────────────────────────────────────────────────────
-    if (phasesToRun.includes('customers')) {
-      emit(res, { phase: 'customers', status: 'started', message: 'Syncing customers...' });
-      try {
-        const { records: customers, latestUpdatedAt } = await fetchList('customers', localMax, limit, 'customers', forceAll);
-        updateGlobalLatest(latestUpdatedAt);
-        let synced = 0;
+  // ─── Customer sync ───────────────────────────────────────────────────────────
+
+  async function syncCustomers() {
+    emitEvent( { phase: 'customers', status: 'started' });
+    const localMax = forceAll ? null : (getSetting('last_sync') || null);
+    try {
+      const page1 = await fetchJson(`${baseUrl}/customers?page=1&per_page=100`, 'customers');
+      let totalPages = page1.meta?.total_pages || 1;
+      let latestUpdatedAt = localMax;
+      let synced = 0;
+
+      for (let page = 1; page <= totalPages; page++) {
+        const data = page === 1 ? page1 : await fetchJson(`${baseUrl}/customers?page=${page}&per_page=100`, 'customers');
+        const customers = data.customers || [];
 
         for (const c of customers) {
-          // Skip already-synced records with no change
-          const existing = db.prepare('SELECT synced, updated_at FROM customers WHERE id = ?').get(c.id);
-          if (existing && existing.synced === 1 && existing.updated_at === c.updated_at) {
-            // Already fully synced and unchanged — just update the list-level fields
-            db.prepare('UPDATE customers SET business_name=?, fullname=?, updated_at=? WHERE id=?').run(
-              c.business_name || '', c.fullname || '', c.updated_at || '', c.id
+          if (forceAll || !localMax || !c.updated_at || c.updated_at > localMax) {
+            const detailData = await fetchJson(`${baseUrl}/customers/${c.id}`, 'customers');
+            const detail = detailData.customer || detailData;
+            db.prepare(`
+              INSERT OR REPLACE INTO customers (id, business_name, fullname, email, phone, mobile, address, address_2, city, state, zip, notes, created_at, updated_at, disabled, location_name, location_id, pdf_url, tax_rate_id, invoice_term_id, referred_by, ref_customer_id, business_and_full_name, business_then_name, contacts, properties, notification_email, invoice_cc_emails, get_sms, opt_out, no_email, latitude, longitude, online_profile_url, raw_json, synced)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            `).run(
+              detail.id, detail.business_name || '', detail.fullname || '', detail.email || '', detail.phone || '', detail.mobile || '',
+              detail.address || '', detail.address_2 || '', detail.city || '', detail.state || '', detail.zip || '',
+              detail.notes || '', detail.created_at || '', detail.updated_at || '',
+              detail.disabled ? 1 : 0, detail.location_name || '', detail.location_id || '', detail.pdf_url || '',
+              detail.tax_rate_id || '', detail.invoice_term_id || '', detail.referred_by || '', detail.ref_customer_id || '',
+              detail.business_and_full_name || '', detail.business_then_name || '',
+              JSON.stringify(detail.contacts || []), JSON.stringify(detail.properties || {}),
+              detail.notification_email || '', detail.invoice_cc_emails || '',
+              detail.get_sms ? 1 : 0, detail.opt_out ? 1 : 0, detail.no_email ? 1 : 0,
+              detail.latitude || '', detail.longitude || '', detail.online_profile_url || '',
+              JSON.stringify(detail)
             );
-          } else {
-            const detail = await fetchDetail('customers', c.id, 'customers');
-            db.prepare(`
-              INSERT OR REPLACE INTO customers (
-                id, business_name, fullname, email, phone, mobile, address, address_2, city, state, zip,
-                notes, created_at, updated_at, disabled, location_name, location_id, pdf_url,
-                tax_rate_id, invoice_term_id, referred_by, ref_customer_id, business_and_full_name,
-                business_then_name, contacts, properties, notification_email, invoice_cc_emails,
-                get_sms, opt_out, no_email, latitude, longitude, online_profile_url, raw_json, synced
-              ) VALUES (
-                @id, @business_name, @fullname, @email, @phone, @mobile, @address, @address_2, @city, @state, @zip,
-                @notes, @created_at, @updated_at, @disabled, @location_name, @location_id, @pdf_url,
-                @tax_rate_id, @invoice_term_id, @referred_by, @ref_customer_id, @business_and_full_name,
-                @business_then_name, @contacts, @properties, @notification_email, @invoice_cc_emails,
-                @get_sms, @opt_out, @no_email, @latitude, @longitude, @online_profile_url, @raw_json, @synced
-              )
-            `).run({
-              id: detail.id, business_name: detail.business_name || '', fullname: detail.fullname || '',
-              email: detail.email || '', phone: detail.phone || '', mobile: detail.mobile || '',
-              address: detail.address || '', address_2: detail.address_2 || '', city: detail.city || '',
-              state: detail.state || '', zip: detail.zip || '', notes: detail.notes || '',
-              created_at: detail.created_at || '', updated_at: detail.updated_at || '',
-              disabled: detail.disabled ? 1 : 0, location_name: detail.location_name || '',
-              location_id: detail.location_id || '', pdf_url: detail.pdf_url || '',
-              tax_rate_id: detail.tax_rate_id || '', invoice_term_id: detail.invoice_term_id || '',
-              referred_by: detail.referred_by || '', ref_customer_id: detail.ref_customer_id || '',
-              business_and_full_name: detail.business_and_full_name || '',
-              business_then_name: detail.business_then_name || '',
-              contacts: JSON.stringify(detail.contacts || []),
-              properties: JSON.stringify(detail.properties || {}),
-              notification_email: detail.notification_email || '',
-              invoice_cc_emails: detail.invoice_cc_emails || '',
-              get_sms: detail.get_sms ? 1 : 0, opt_out: detail.opt_out ? 1 : 0,
-              no_email: detail.no_email ? 1 : 0, latitude: detail.latitude || '',
-              longitude: detail.longitude || '', online_profile_url: detail.online_profile_url || '',
-              raw_json: JSON.stringify(detail), synced: 1,
-            });
+            if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
           }
           synced++;
-          emit(res, { phase: 'customers', status: 'progress', current: synced, total: customers.length });
-          if (res.aborted) { emit(res, { phase: 'customers', status: 'cancelled' }); results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
+          emitEvent( { phase: 'customers', status: 'progress', current: synced });
           await new Promise(r => setTimeout(r, 350));
         }
 
-        results.customers = synced;
-        log('SYNC_ENTITY', `Customers: +${synced}`);
-        emit(res, { phase: 'customers', status: 'done', count: synced });
-      } catch (e) {
-        const detail = e instanceof ApiError
-          ? { phase: 'customers', url: `${baseUrl}/${e.endpoint}`, pageOrId: e.pageOrId, status: e.status, response: e.body }
-          : { phase: 'customers', error: e.message };
-        results.errors.push(`customers: ${e.message}`);
-        log('SYNC_ERROR', JSON.stringify(detail));
-        emit(res, { phase: 'customers', status: 'error', error: e.message });
+        if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
       }
-      if (singlePhase) { results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
+
+      if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
+      results.customers = synced;
+      log('SYNC_ENTITY', `Customers: ${synced}`);
+      emitEvent( { phase: 'customers', status: 'done', count: synced });
+    } catch (e) {
+      results.errors = results.errors || [];
+      results.errors.push(`customers: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent( { phase: 'customers', status: 'error', error: e.message });
     }
-
-    // ── CONTACTS ───────────────────────────────────────────────────────────────
-    if (phasesToRun.includes('contacts')) {
-      emit(res, { phase: 'contacts', status: 'started', message: 'Syncing contacts...' });
-      try {
-        const { records: contacts, latestUpdatedAt } = await fetchList('contacts', localMax, limit, 'contacts', forceAll);
-        updateGlobalLatest(latestUpdatedAt);
-        let synced = 0;
-
-        for (const c of contacts) {
-          const existing = db.prepare('SELECT synced, updated_at FROM contacts WHERE id = ?').get(c.id);
-          if (existing && existing.synced === 1 && existing.updated_at === c.updated_at) {
-            db.prepare('UPDATE contacts SET name=?, updated_at=? WHERE id=?').run(
-              c.name || '', c.updated_at || '', c.id
-            );
-          } else {
-            const detail = await fetchDetail('contacts', c.id, 'contacts');
-            db.prepare(`
-              INSERT OR REPLACE INTO contacts (
-                id, customer_id, name, address1, address2, city, state, zip,
-                email, phone, mobile, latitude, longitude, notes, created_at, updated_at,
-                vendor_id, opt_out, extension, processed_phone, processed_mobile,
-                ticket_matching_emails, properties, account_id, raw_json, synced
-              ) VALUES (
-                @id, @customer_id, @name, @address1, @address2, @city, @state, @zip,
-                @email, @phone, @mobile, @latitude, @longitude, @notes, @created_at, @updated_at,
-                @vendor_id, @opt_out, @extension, @processed_phone, @processed_mobile,
-                @ticket_matching_emails, @properties, @account_id, @raw_json, @synced
-              )
-            `).run({
-              id: detail.id, customer_id: detail.customer_id, name: detail.name || '',
-              address1: detail.address1 || '', address2: detail.address2 || '', city: detail.city || '',
-              state: detail.state || '', zip: detail.zip || '', email: detail.email || '',
-              phone: detail.phone || '', mobile: detail.mobile || '', latitude: detail.latitude || '',
-              longitude: detail.longitude || '', notes: detail.notes || '',
-              created_at: detail.created_at || '', updated_at: detail.updated_at || '',
-              vendor_id: detail.vendor_id || '', opt_out: detail.opt_out ? 1 : 0,
-              extension: detail.extension || '', processed_phone: detail.processed_phone || '',
-              processed_mobile: detail.processed_mobile || '',
-              ticket_matching_emails: JSON.stringify(detail.ticket_matching_emails || []),
-              properties: JSON.stringify(detail.properties || {}),
-              account_id: detail.account_id || '',
-              raw_json: JSON.stringify(detail), synced: 1,
-            });
-          }
-          synced++;
-          emit(res, { phase: 'contacts', status: 'progress', current: synced, total: contacts.length });
-          if (res.aborted) { emit(res, { phase: 'contacts', status: 'cancelled' }); results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-          await new Promise(r => setTimeout(r, 350));
-        }
-
-        results.contacts = synced;
-        log('SYNC_ENTITY', `Contacts: +${synced}`);
-        emit(res, { phase: 'contacts', status: 'done', count: synced });
-      } catch (e) {
-        const detail = e instanceof ApiError
-          ? { phase: 'contacts', url: `${baseUrl}/${e.endpoint}`, pageOrId: e.pageOrId, status: e.status, response: e.body }
-          : { phase: 'contacts', error: e.message };
-        results.errors.push(`contacts: ${e.message}`);
-        log('SYNC_ERROR', JSON.stringify(detail));
-        emit(res, { phase: 'contacts', status: 'error', error: e.message });
-      }
-      if (singlePhase) { results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-    }
-
-    // ── TICKETS ────────────────────────────────────────────────────────────────
-    if (phasesToRun.includes('tickets')) {
-      emit(res, { phase: 'tickets', status: 'started', message: 'Syncing tickets...' });
-      try {
-        const { records: tickets, latestUpdatedAt } = await fetchList('tickets', localMax, limit, 'tickets', forceAll);
-        updateGlobalLatest(latestUpdatedAt);
-        let synced = 0;
-
-        for (const t of tickets) {
-          // Skip already-synced resolved tickets with no change; non-resolved always refetch
-          const existingTicket = db.prepare('SELECT synced, updated_at FROM tickets WHERE id = ?').get(t.id);
-          if (existingTicket && existingTicket.synced === 1 && existingTicket.updated_at === t.updated_at && t.status === 'resolved') {
-            // Already fully synced and unchanged — skip detail fetch
-          } else {
-            const detail = await fetchDetail('tickets', t.id, 'tickets');
-
-            // Upsert ticket with raw_json
-            db.prepare(`
-              INSERT OR REPLACE INTO tickets (
-                id, number, subject, created_at, customer_id, customer_business_then_name,
-                due_date, resolved_at, start_at, end_at, location_id, problem_type, status,
-                ticket_type_id, user_id, updated_at, pdf_url, priority, comments, user, raw_json, synced
-              ) VALUES (
-                @id, @number, @subject, @created_at, @customer_id, @customer_business_then_name,
-                @due_date, @resolved_at, @start_at, @end_at, @location_id, @problem_type, @status,
-                @ticket_type_id, @user_id, @updated_at, @pdf_url, @priority, @comments, @user, @raw_json, @synced
-              )
-            `).run({
-              id: detail.id, number: String(detail.number || ''), subject: detail.subject || '',
-              created_at: detail.created_at || '', customer_id: detail.customer_id,
-              customer_business_then_name: detail.customer_business_then_name || '',
-              due_date: detail.due_date || '', resolved_at: detail.resolved_at || '',
-              start_at: detail.start_at || '', end_at: detail.end_at || '',
-              location_id: detail.location_id || '', problem_type: detail.problem_type || '',
-              status: detail.status || '', ticket_type_id: detail.ticket_type_id || '',
-              user_id: detail.user_id || '', updated_at: detail.updated_at || '',
-              pdf_url: detail.pdf_url || '', priority: detail.priority || '',
-              comments: JSON.stringify(detail.comments || []),
-              user: detail.user ? JSON.stringify(detail.user) : '',
-              raw_json: JSON.stringify(detail), synced: 1,
-            });
-
-            // Upsert comments from detail response
-            const comments = detail.comments || [];
-            for (const c of comments) {
-              db.prepare(`
-                INSERT OR REPLACE INTO ticket_comments (
-                  id, ticket_id, body, tech, user_id, created_at, updated_at, raw_json
-                ) VALUES (
-                  @id, @ticket_id, @body, @tech, @user_id, @created_at, @updated_at, @raw_json
-                )
-              `).run({
-                id: c.id, ticket_id: detail.id,
-                body: c.body || '', tech: c.tech || c.user || c.author || '',
-                user_id: c.user_id || '', created_at: c.created_at || '',
-                updated_at: c.updated_at || '',
-                raw_json: JSON.stringify(c),
-              });
-            }
-            results.ticket_comments += comments.length;
-
-            // Upsert time entries (ticket_timers in API response)
-            const timers = detail.ticket_timers || [];
-            for (const te of timers) {
-              db.prepare(`
-                INSERT OR REPLACE INTO ticket_time_entries (
-                  id, ticket_id, user_id, start_time, end_time, recorded, billable,
-                  notes, active_duration, product_id, created_at, updated_at, raw_json
-                ) VALUES (
-                  @id, @ticket_id, @user_id, @start_time, @end_time, @recorded, @billable,
-                  @notes, @active_duration, @product_id, @created_at, @updated_at, @raw_json
-                )
-              `).run({
-                id: te.id, ticket_id: detail.id,
-                user_id: te.user_id || '', start_time: te.start_time || '',
-                end_time: te.end_time || '', recorded: te.recorded ? 1 : 0,
-                billable: te.billable ? 1 : 0, notes: te.notes || '',
-                active_duration: te.active_duration || 0, product_id: te.product_id || '',
-                created_at: te.created_at || '', updated_at: te.updated_at || '',
-                raw_json: JSON.stringify(te),
-              });
-            }
-            results.ticket_time_entries += timers.length;
-
-            // Upsert line items
-            const lineItems = detail.line_items || [];
-            for (const li of lineItems) {
-              db.prepare(`
-                INSERT OR REPLACE INTO ticket_line_items (
-                  id, ticket_id, product_id, quantity, price, description, created_at, updated_at, raw_json
-                ) VALUES (
-                  @id, @ticket_id, @product_id, @quantity, @price, @description, @created_at, @updated_at, @raw_json
-                )
-              `).run({
-                id: li.id, ticket_id: detail.id,
-                product_id: li.product_id || '',
-                quantity: parseFloat(li.quantity) || 0,
-                price: parseFloat(li.retail_cents) / 100 || parseFloat(li.price) || 0,
-                description: li.description || li.name || '',
-                created_at: li.created_at || '', updated_at: li.updated_at || '',
-                raw_json: JSON.stringify(li),
-              });
-            }
-            results.ticket_line_items += lineItems.length;
-          }
-
-          synced++;
-          emit(res, { phase: 'tickets', status: 'progress', current: synced, total: tickets.length });
-          if (res.aborted) { emit(res, { phase: 'tickets', status: 'cancelled' }); results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-          await new Promise(r => setTimeout(r, 350));
-        }
-
-        results.tickets = synced;
-        log('SYNC_ENTITY', `Tickets: +${synced} (comments:+${results.ticket_comments} timers:+${results.ticket_time_entries} line_items:+${results.ticket_line_items})`);
-        emit(res, { phase: 'tickets', status: 'done', count: synced });
-      } catch (e) {
-        const detail = e instanceof ApiError
-          ? { phase: 'tickets', url: `${baseUrl}/${e.endpoint}`, pageOrId: e.pageOrId, status: e.status, response: e.body }
-          : { phase: 'tickets', error: e.message };
-        results.errors.push(`tickets: ${e.message}`);
-        log('SYNC_ERROR', JSON.stringify(detail));
-        emit(res, { phase: 'tickets', status: 'error', error: e.message });
-      }
-      if (singlePhase) { results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-    }
-
-    // ── INVOICES ───────────────────────────────────────────────────────────────
-    if (phasesToRun.includes('invoices')) {
-      emit(res, { phase: 'invoices', status: 'started', message: 'Syncing invoices...' });
-      try {
-        const { records: invoices, latestUpdatedAt } = await fetchList('invoices', localMax, limit, 'invoices', forceAll);
-        updateGlobalLatest(latestUpdatedAt);
-        let synced = 0;
-
-        for (const inv of invoices) {
-          const existing = db.prepare('SELECT synced, updated_at FROM invoices WHERE id = ?').get(inv.id);
-          if (existing && existing.synced === 1 && existing.updated_at === inv.updated_at) {
-            db.prepare('UPDATE invoices SET customer_business_then_name=?, updated_at=? WHERE id=?').run(
-              inv.customer_business_then_name || '', inv.updated_at || '', inv.id
-            );
-          } else {
-            const detail = await fetchDetail('invoices', inv.id, 'invoices');
-            db.prepare(`
-              INSERT OR REPLACE INTO invoices (
-                id, customer_id, customer_business_then_name, number, created_at, updated_at,
-                date, due_date, subtotal, total, tax, verified_paid, tech_marked_paid,
-                ticket_id, pdf_url, is_paid, location_id, po_number, contact_id, note,
-                hardwarecost, user_id, raw_json, synced
-              ) VALUES (
-                @id, @customer_id, @customer_business_then_name, @number, @created_at, @updated_at,
-                @date, @due_date, @subtotal, @total, @tax, @verified_paid, @tech_marked_paid,
-                @ticket_id, @pdf_url, @is_paid, @location_id, @po_number, @contact_id, @note,
-                @hardwarecost, @user_id, @raw_json, @synced
-              )
-            `).run({
-              id: detail.id, customer_id: detail.customer_id,
-              customer_business_then_name: detail.customer_business_then_name || detail.customer?.business_name || detail.customer?.fullname || '',
-              number: String(detail.number || ''), created_at: detail.created_at || '',
-              updated_at: detail.updated_at || '', date: detail.date || '',
-              due_date: detail.due_date || '', subtotal: detail.subtotal || '',
-              total: detail.total || '', tax: detail.tax || '',
-              verified_paid: detail.verified_paid ? 1 : 0,
-              tech_marked_paid: detail.tech_marked_paid ? 1 : 0,
-              ticket_id: detail.ticket_id || '', pdf_url: detail.pdf_url || '',
-              is_paid: detail.is_paid ? 1 : 0, location_id: detail.location_id || '',
-              po_number: detail.po_number || '', contact_id: detail.contact_id || '',
-              note: detail.note || '', hardwarecost: detail.hardwarecost || '',
-              user_id: detail.user_id || '',
-              raw_json: JSON.stringify(detail), synced: 1,
-            });
-          }
-          synced++;
-          emit(res, { phase: 'invoices', status: 'progress', current: synced, total: invoices.length });
-          if (res.aborted) { emit(res, { phase: 'invoices', status: 'cancelled' }); results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-          await new Promise(r => setTimeout(r, 350));
-        }
-
-        results.invoices = synced;
-        log('SYNC_ENTITY', `Invoices: +${synced}`);
-        emit(res, { phase: 'invoices', status: 'done', count: synced });
-      } catch (e) {
-        const detail = e instanceof ApiError
-          ? { phase: 'invoices', url: `${baseUrl}/${e.endpoint}`, pageOrId: e.pageOrId, status: e.status, response: e.body }
-          : { phase: 'invoices', error: e.message };
-        results.errors.push(`invoices: ${e.message}`);
-        log('SYNC_ERROR', JSON.stringify(detail));
-        emit(res, { phase: 'invoices', status: 'error', error: e.message });
-      }
-      if (singlePhase) { results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-    }
-
-    // ── ASSETS ────────────────────────────────────────────────────────────────
-    if (phasesToRun.includes('assets')) {
-      emit(res, { phase: 'assets', status: 'started', message: 'Syncing assets...' });
-      try {
-        const { records: assets, latestUpdatedAt } = await fetchList('customer_assets', localMax, limit, 'assets', forceAll);
-        updateGlobalLatest(latestUpdatedAt);
-        let synced = 0;
-
-        for (const a of assets) {
-          const existing = db.prepare('SELECT synced, updated_at FROM assets WHERE id = ?').get(a.id);
-          if (existing && existing.synced === 1 && existing.updated_at === a.updated_at) {
-            db.prepare('UPDATE assets SET name=?, updated_at=? WHERE id=?').run(
-              a.name || '', a.updated_at || '', a.id
-            );
-          } else {
-            const detail = await fetchDetail('customer_assets', a.id, 'assets');
-            db.prepare(`
-              INSERT OR REPLACE INTO assets (
-                id, name, customer_id, contact_id, created_at, updated_at,
-                properties, asset_type, asset_serial, external_rmm_link, rmm_links,
-                has_live_chat, snmp_enabled, device_info, rmm_store, address, customer, raw_json, synced
-              ) VALUES (
-                @id, @name, @customer_id, @contact_id, @created_at, @updated_at,
-                @properties, @asset_type, @asset_serial, @external_rmm_link, @rmm_links,
-                @has_live_chat, @snmp_enabled, @device_info, @rmm_store, @address, @customer, @raw_json, @synced
-              )
-            `).run({
-              id: detail.id, name: detail.name || '',
-              customer_id: detail.customer_id || null, contact_id: detail.contact_id || null,
-              created_at: detail.created_at || '', updated_at: detail.updated_at || '',
-              properties: JSON.stringify(detail.properties || {}),
-              asset_type: detail.asset_type || '', asset_serial: detail.asset_serial || '',
-              external_rmm_link: detail.external_rmm_link || '',
-              rmm_links: JSON.stringify(detail.rmm_links || []),
-              has_live_chat: detail.has_live_chat ? 1 : 0,
-              snmp_enabled: detail.snmp_enabled ? 1 : 0,
-              device_info: JSON.stringify(detail.device_info || {}),
-              rmm_store: JSON.stringify(detail.rmm_store || {}),
-              address: JSON.stringify(detail.address || {}),
-              customer: JSON.stringify(detail.customer || {}),
-              raw_json: JSON.stringify(detail), synced: 1,
-            });
-          }
-          synced++;
-          emit(res, { phase: 'assets', status: 'progress', current: synced, total: assets.length });
-          if (res.aborted) { emit(res, { phase: 'assets', status: 'cancelled' }); results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-          await new Promise(r => setTimeout(r, 350));
-        }
-
-        results.assets = synced;
-        log('SYNC_ENTITY', `Assets: +${synced}`);
-        emit(res, { phase: 'assets', status: 'done', count: synced });
-      } catch (e) {
-        const detail = e instanceof ApiError
-          ? { phase: 'assets', url: `${baseUrl}/${e.endpoint}`, pageOrId: e.pageOrId, status: e.status, response: e.body }
-          : { phase: 'assets', error: e.message };
-        results.errors.push(`assets: ${e.message}`);
-        log('SYNC_ERROR', JSON.stringify(detail));
-        emit(res, { phase: 'assets', status: 'error', error: e.message });
-      }
-      if (singlePhase) { results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-    }
-
-    // ── ESTIMATES ─────────────────────────────────────────────────────────────
-    if (phasesToRun.includes('estimates')) {
-      emit(res, { phase: 'estimates', status: 'started', message: 'Syncing estimates...' });
-      try {
-        const { records: estimates, latestUpdatedAt } = await fetchList('estimates', localMax, limit, 'estimates', forceAll);
-        updateGlobalLatest(latestUpdatedAt);
-        let synced = 0;
-
-        for (const e of estimates) {
-          const existing = db.prepare('SELECT synced, updated_at FROM estimates WHERE id = ?').get(e.id);
-          if (existing && existing.synced === 1 && existing.updated_at === e.updated_at) {
-            db.prepare('UPDATE estimates SET customer_business_then_name=?, updated_at=? WHERE id=?').run(
-              e.customer_business_then_name || '', e.updated_at || '', e.id
-            );
-          } else {
-            try {
-              const detail = await fetchDetail('estimates', e.id, 'estimates');
-              db.prepare(`
-                INSERT OR REPLACE INTO estimates (
-                  id, customer_business_then_name, number, status, created_at, updated_at,
-                  customer_id, date, subtotal, total, tax, ticket_id, pdf_url,
-                  location_id, invoice_id, employee, raw_json, synced
-                ) VALUES (
-                  @id, @customer_business_then_name, @number, @status, @created_at, @updated_at,
-                  @customer_id, @date, @subtotal, @total, @tax, @ticket_id, @pdf_url,
-                  @location_id, @invoice_id, @employee, @raw_json, @synced
-                )
-              `).run({
-                id: detail.id,
-                customer_business_then_name: detail.customer_business_then_name || '',
-                number: String(detail.number || ''), status: detail.status || '',
-                created_at: detail.created_at || '', updated_at: detail.updated_at || '',
-                customer_id: detail.customer_id || null, date: detail.date || '',
-                subtotal: detail.subtotal || '', total: detail.total || '', tax: detail.tax || '',
-                ticket_id: detail.ticket_id || '', pdf_url: detail.pdf_url || '',
-                location_id: detail.location_id || '', invoice_id: detail.invoice_id || '',
-                employee: detail.employee || '',
-                raw_json: JSON.stringify(detail), synced: 1,
-              });
-              synced++;
-            } catch (detailErr) {
-              const errDetail = detailErr instanceof ApiError
-                ? { phase: 'estimates', item_id: e.id, url: `${baseUrl}/${detailErr.endpoint}/${e.id}`, method: 'GET', status: detailErr.status, response: detailErr.body }
-                : { phase: 'estimates', item_id: e.id, error: detailErr.message };
-              results.errors.push(`estimates/${e.id}: ${detailErr.message}`);
-              log('SYNC_ERROR', JSON.stringify(errDetail));
-            }
-          }
-          emit(res, { phase: 'estimates', status: 'progress', current: synced, total: estimates.length });
-          if (res.aborted) { emit(res, { phase: 'estimates', status: 'cancelled' }); results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-          await new Promise(r => setTimeout(r, 350));
-        }
-
-        results.estimates = synced;
-        log('SYNC_ENTITY', `Estimates: +${synced}`);
-        emit(res, { phase: 'estimates', status: 'done', count: synced });
-      } catch (e) {
-        const detail = e instanceof ApiError
-          ? { phase: 'estimates', url: `${baseUrl}/${e.endpoint}`, pageOrId: e.pageOrId, status: e.status, response: e.body }
-          : { phase: 'estimates', error: e.message };
-        log('SYNC_ERROR', JSON.stringify(detail));
-      }
-      if (singlePhase) { results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-    }
-
-    // ── PURCHASE ORDERS ────────────────────────────────────────────────────────
-    if (phasesToRun.includes('purchase_orders')) {
-      emit(res, { phase: 'purchase_orders', status: 'started', message: 'Syncing purchase orders...' });
-      try {
-        const { records: pos, latestUpdatedAt } = await fetchList('purchase_orders', localMax, limit, 'purchase_orders', forceAll);
-        updateGlobalLatest(latestUpdatedAt);
-        let synced = 0;
-
-        for (const p of pos) {
-          const existing = db.prepare('SELECT synced, updated_at FROM purchase_orders WHERE id = ?').get(p.id);
-          if (existing && existing.synced === 1 && existing.updated_at === p.updated_at) {
-            db.prepare('UPDATE purchase_orders SET updated_at=? WHERE id=?').run(p.updated_at || '', p.id);
-          } else {
-            const detail = await fetchDetail('purchase_orders', p.id, 'purchase_orders');
-            db.prepare(`
-              INSERT OR REPLACE INTO purchase_orders (
-                id, account_subdomain, created_at, updated_at, expected_date, number,
-                other, shipping, shipping_notes, status, total, user_id, vendor_id,
-                location_id, due_date, paid_date, delivery_tracking,
-                vendor, location, line_items, raw_json, synced
-              ) VALUES (
-                @id, @account_subdomain, @created_at, @updated_at, @expected_date, @number,
-                @other, @shipping, @shipping_notes, @status, @total, @user_id, @vendor_id,
-                @location_id, @due_date, @paid_date, @delivery_tracking,
-                @vendor, @location, @line_items, @raw_json, @synced
-              )
-            `).run({
-              id: detail.id,
-              account_subdomain: detail.account_subdomain || '',
-              created_at: detail.created_at || '', updated_at: detail.updated_at || '',
-              expected_date: detail.expected_date || '', number: detail.number || '',
-              other: detail.other || '', shipping: detail.shipping || '',
-              shipping_notes: detail.shipping_notes || '', status: detail.status || '',
-              total: detail.total || '', user_id: detail.user_id || '',
-              vendor_id: detail.vendor_id || null,
-              location_id: detail.location_id || '',
-              due_date: detail.due_date || '', paid_date: detail.paid_date || '',
-              delivery_tracking: detail.delivery_tracking || '',
-              vendor: JSON.stringify(detail.vendor || {}),
-              location: JSON.stringify(detail.location || {}),
-              line_items: JSON.stringify(detail.line_items || []),
-              raw_json: JSON.stringify(detail), synced: 1,
-            });
-          }
-          synced++;
-          emit(res, { phase: 'purchase_orders', status: 'progress', current: synced, total: pos.length });
-          if (res.aborted) { emit(res, { phase: 'purchase_orders', status: 'cancelled' }); results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-          await new Promise(r => setTimeout(r, 350));
-        }
-
-        results.purchase_orders = synced;
-        log('SYNC_ENTITY', `Purchase Orders: +${synced}`);
-        emit(res, { phase: 'purchase_orders', status: 'done', count: synced });
-      } catch (e) {
-        const detail = e instanceof ApiError
-          ? { phase: 'purchase_orders', url: `${baseUrl}/${e.endpoint}`, pageOrId: e.pageOrId, status: e.status, response: e.body }
-          : { phase: 'purchase_orders', error: e.message };
-        results.errors.push(`purchase_orders: ${e.message}`);
-        log('SYNC_ERROR', JSON.stringify(detail));
-        emit(res, { phase: 'purchase_orders', status: 'error', error: e.message });
-      }
-      if (singlePhase) { results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-    }
-
-    // ── VENDORS ────────────────────────────────────────────────────────────────
-    if (phasesToRun.includes('vendors')) {
-      emit(res, { phase: 'vendors', status: 'started', message: 'Syncing vendors...' });
-      try {
-        // Vendors list is a single page, no pagination
-        const { records: vendors, latestUpdatedAt } = await fetchList('vendors', localMax, limit, 'vendors', forceAll);
-        updateGlobalLatest(latestUpdatedAt);
-        let synced = 0;
-
-        for (const v of vendors) {
-          const existing = db.prepare('SELECT synced, updated_at FROM vendors WHERE id = ?').get(v.id);
-          if (existing && existing.synced === 1 && existing.updated_at === v.updated_at) {
-            db.prepare('UPDATE vendors SET name=?, updated_at=? WHERE id=?').run(v.name || '', v.updated_at || '', v.id);
-          } else {
-            const detail = await fetchDetail('vendors', v.id, 'vendors');
-            db.prepare(`
-              INSERT OR REPLACE INTO vendors (
-                id, name, rep_first_name, rep_last_name, email, phone,
-                account_number, created_at, updated_at, address, city, state,
-                zip, website, notes, raw_json, synced
-              ) VALUES (
-                @id, @name, @rep_first_name, @rep_last_name, @email, @phone,
-                @account_number, @created_at, @updated_at, @address, @city, @state,
-                @zip, @website, @notes, @raw_json, @synced
-              )
-            `).run({
-              id: detail.id, name: detail.name || '',
-              rep_first_name: detail.rep_first_name || '', rep_last_name: detail.rep_last_name || '',
-              email: detail.email || '', phone: detail.phone || '',
-              account_number: detail.account_number || '',
-              created_at: detail.created_at || '', updated_at: detail.updated_at || '',
-              address: detail.address || '', city: detail.city || '',
-              state: detail.state || '', zip: detail.zip || '',
-              website: detail.website || '', notes: detail.notes || '',
-              raw_json: JSON.stringify(detail), synced: 1,
-            });
-          }
-          synced++;
-          emit(res, { phase: 'vendors', status: 'progress', current: synced, total: vendors.length });
-          if (res.aborted) { emit(res, { phase: 'vendors', status: 'cancelled' }); results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-          await new Promise(r => setTimeout(r, 350));
-        }
-
-        results.vendors = synced;
-        log('SYNC_ENTITY', `Vendors: +${synced}`);
-        emit(res, { phase: 'vendors', status: 'done', count: synced });
-      } catch (e) {
-        const detail = e instanceof ApiError
-          ? { phase: 'vendors', url: `${baseUrl}/${e.endpoint}`, pageOrId: e.pageOrId, status: e.status, response: e.body }
-          : { phase: 'vendors', error: e.message };
-        results.errors.push(`vendors: ${e.message}`);
-        log('SYNC_ERROR', JSON.stringify(detail));
-        emit(res, { phase: 'vendors', status: 'error', error: e.message });
-      }
-      if (singlePhase) { results.duration = Date.now() - startTime; emit(res, { phase: 'done', results }); res.end(); return; }
-    }
-
-    setSetting('last_sync', globalLatest || new Date().toISOString());
-    results.lastSync = globalLatest || new Date().toISOString();
-    results.duration = Date.now() - startTime;
-
-    log('SYNC_COMPLETE', `Sync complete — customers:+${results.customers} contacts:+${results.contacts} tickets:+${results.tickets} invoices:+${results.invoices} comments:+${results.ticket_comments} timers:+${results.ticket_time_entries} line_items:+${results.ticket_line_items} errors:${results.errors.length} duration:${results.duration}ms`);
-    emit(res, { phase: 'done', results });
-
-  } catch (e) {
-    const detail = e instanceof ApiError
-      ? { phase: 'sync', url: `${baseUrl}/${e.endpoint}`, pageOrId: e.pageOrId, status: e.status, response: e.body }
-      : { phase: 'sync', error: e.message };
-    log('SYNC_ERROR', JSON.stringify(detail));
-    emit(res, { phase: 'error', error: e.message, results });
   }
 
-  res.end();
-});
+  // ─── Contacts sync ──────────────────────────────────────────────────────────
 
-// DELETE /api/sync/trigger - cancel an ongoing sync
+  async function syncContacts() {
+    emitEvent( { phase: 'contacts', status: 'started' });
+    const localMax = forceAll ? null : (getSetting('last_sync') || null);
+    try {
+      const page1 = await fetchJson(`${baseUrl}/contacts?page=1&per_page=100`, 'contacts');
+      let totalPages = page1.meta?.total_pages || 1;
+      let latestUpdatedAt = localMax;
+      let synced = 0;
+
+      for (let page = 1; page <= totalPages; page++) {
+        const data = page === 1 ? page1 : await fetchJson(`${baseUrl}/contacts?page=${page}&per_page=100`, 'contacts');
+        const contacts = data.contacts || [];
+
+        for (const c of contacts) {
+          if (forceAll || !localMax || !c.updated_at || c.updated_at > localMax) {
+            const detailData = await fetchJson(`${baseUrl}/contacts/${c.id}`, 'contacts');
+            const detail = detailData.contact || detailData;
+            db.prepare(`
+              INSERT OR REPLACE INTO contacts (id, customer_id, name, address1, address2, city, state, zip, email, phone, mobile, latitude, longitude, notes, created_at, updated_at, vendor_id, opt_out, extension, processed_phone, processed_mobile, ticket_matching_emails, properties, account_id, raw_json, synced)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            `).run(
+              detail.id, detail.customer_id, detail.name || '', detail.address1 || '', detail.address2 || '',
+              detail.city || '', detail.state || '', detail.zip || '', detail.email || '',
+              detail.phone || '', detail.mobile || '', detail.latitude || '', detail.longitude || '',
+              detail.notes || '', detail.created_at || '', detail.updated_at || '',
+              detail.vendor_id || '', detail.opt_out ? 1 : 0, detail.extension || '',
+              detail.processed_phone || '', detail.processed_mobile || '',
+              JSON.stringify(detail.ticket_matching_emails || []),
+              JSON.stringify(detail.properties || {}),
+              detail.account_id || '', JSON.stringify(detail)
+            );
+            if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
+          }
+          synced++;
+          emitEvent( { phase: 'contacts', status: 'progress', current: synced });
+          await new Promise(r => setTimeout(r, 350));
+        }
+
+        if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
+      }
+
+      if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
+      results.contacts = synced;
+      log('SYNC_ENTITY', `Contacts: ${synced}`);
+      emitEvent( { phase: 'contacts', status: 'done', count: synced });
+    } catch (e) {
+      results.errors = results.errors || [];
+      results.errors.push(`contacts: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent( { phase: 'contacts', status: 'error', error: e.message });
+    }
+  }
+
+  // ─── Invoices sync ───────────────────────────────────────────────────────────
+
+  async function syncInvoices() {
+    emitEvent( { phase: 'invoices', status: 'started' });
+    const localMax = forceAll ? null : (getSetting('last_sync') || null);
+    try {
+      const page1 = await fetchJson(`${baseUrl}/invoices?page=1&per_page=100`, 'invoices');
+      let totalPages = page1.meta?.total_pages || 1;
+      let latestUpdatedAt = localMax;
+      let synced = 0;
+
+      for (let page = 1; page <= totalPages; page++) {
+        const data = page === 1 ? page1 : await fetchJson(`${baseUrl}/invoices?page=${page}&per_page=100`, 'invoices');
+        const invoices = data.invoices || [];
+
+        for (const inv of invoices) {
+          if (forceAll || !localMax || !inv.updated_at || inv.updated_at > localMax) {
+            const detailData = await fetchJson(`${baseUrl}/invoices/${inv.id}`, 'invoices');
+            const detail = detailData.invoice || detailData;
+            db.prepare(`
+              INSERT OR REPLACE INTO invoices (id, customer_id, customer_business_then_name, number, created_at, updated_at, date, due_date, subtotal, total, tax, verified_paid, tech_marked_paid, ticket_id, pdf_url, is_paid, location_id, po_number, contact_id, note, hardwarecost, user_id, raw_json, synced)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            `).run(
+              detail.id, detail.customer_id,
+              detail.customer_business_then_name || detail.customer?.business_name || detail.customer?.fullname || '',
+              String(detail.number || ''), detail.created_at || '', detail.updated_at || '',
+              detail.date || '', detail.due_date || '', detail.subtotal || '', detail.total || '', detail.tax || '',
+              detail.verified_paid ? 1 : 0, detail.tech_marked_paid ? 1 : 0,
+              detail.ticket_id || '', detail.pdf_url || '',
+              detail.is_paid ? 1 : 0, detail.location_id || '',
+              detail.po_number || '', detail.contact_id || '',
+              detail.note || '', detail.hardwarecost || '', detail.user_id || '', JSON.stringify(detail)
+            );
+            if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
+          }
+          synced++;
+          emitEvent( { phase: 'invoices', status: 'progress', current: synced });
+          await new Promise(r => setTimeout(r, 350));
+        }
+
+        if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
+      }
+
+      if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
+      results.invoices = synced;
+      log('SYNC_ENTITY', `Invoices: ${synced}`);
+      emitEvent( { phase: 'invoices', status: 'done', count: synced });
+    } catch (e) {
+      results.errors = results.errors || [];
+      results.errors.push(`invoices: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent( { phase: 'invoices', status: 'error', error: e.message });
+    }
+  }
+
+  // ─── Assets sync ─────────────────────────────────────────────────────────────
+
+  async function syncAssets() {
+    emitEvent( { phase: 'assets', status: 'started' });
+    const localMax = forceAll ? null : (getSetting('last_sync') || null);
+    try {
+      const page1 = await fetchJson(`${baseUrl}/customer_assets?page=1&per_page=100`, 'assets');
+      let totalPages = page1.meta?.total_pages || 1;
+      let latestUpdatedAt = localMax;
+      let synced = 0;
+
+      for (let page = 1; page <= totalPages; page++) {
+        const data = page === 1 ? page1 : await fetchJson(`${baseUrl}/customer_assets?page=${page}&per_page=100`, 'assets');
+        const assets = data.assets || [];
+
+        for (const a of assets) {
+          if (forceAll || !localMax || !a.updated_at || a.updated_at > localMax) {
+            const detailData = await fetchJson(`${baseUrl}/customer_assets/${a.id}`, 'assets');
+            const detail = detailData.asset || detailData;
+            db.prepare(`
+              INSERT OR REPLACE INTO assets (id, name, customer_id, contact_id, created_at, updated_at, properties, asset_type, asset_serial, external_rmm_link, rmm_links, has_live_chat, snmp_enabled, device_info, rmm_store, address, customer, raw_json, synced)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            `).run(
+              detail.id, detail.name || '', detail.customer_id || null, detail.contact_id || null,
+              detail.created_at || '', detail.updated_at || '',
+              JSON.stringify(detail.properties || {}), detail.asset_type || '', detail.asset_serial || '',
+              detail.external_rmm_link || '', JSON.stringify(detail.rmm_links || []),
+              detail.has_live_chat ? 1 : 0, detail.snmp_enabled ? 1 : 0,
+              JSON.stringify(detail.device_info || {}), JSON.stringify(detail.rmm_store || {}),
+              JSON.stringify(detail.address || {}), JSON.stringify(detail.customer || {}), JSON.stringify(detail)
+            );
+            if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
+          }
+          synced++;
+          emitEvent( { phase: 'assets', status: 'progress', current: synced });
+          await new Promise(r => setTimeout(r, 350));
+        }
+
+        if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
+      }
+
+      if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
+      results.assets = synced;
+      log('SYNC_ENTITY', `Assets: ${synced}`);
+      emitEvent( { phase: 'assets', status: 'done', count: synced });
+    } catch (e) {
+      results.errors = results.errors || [];
+      results.errors.push(`assets: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent( { phase: 'assets', status: 'error', error: e.message });
+    }
+  }
+
+  // ─── Estimates sync ───────────────────────────────────────────────────────────
+
+  async function syncEstimates() {
+    emitEvent( { phase: 'estimates', status: 'started' });
+    const localMax = forceAll ? null : (getSetting('last_sync') || null);
+    try {
+      const page1 = await fetchJson(`${baseUrl}/estimates?page=1&per_page=100`, 'estimates');
+      let totalPages = page1.meta?.total_pages || 1;
+      let latestUpdatedAt = localMax;
+      let synced = 0;
+
+      for (let page = 1; page <= totalPages; page++) {
+        const data = page === 1 ? page1 : await fetchJson(`${baseUrl}/estimates?page=${page}&per_page=100`, 'estimates');
+        const estimates = data.estimates || [];
+
+        for (const e of estimates) {
+          if (forceAll || !localMax || !e.updated_at || e.updated_at > localMax) {
+            try {
+              const detailData = await fetchJson(`${baseUrl}/estimates/${e.id}`, 'estimates');
+              const detail = detailData.estimate || detailData;
+              db.prepare(`
+                INSERT OR REPLACE INTO estimates (id, customer_business_then_name, number, status, created_at, updated_at, customer_id, date, subtotal, total, tax, ticket_id, pdf_url, location_id, invoice_id, employee, raw_json, synced)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+              `).run(
+                detail.id, detail.customer_business_then_name || '',
+                String(detail.number || ''), detail.status || '',
+                detail.created_at || '', detail.updated_at || '',
+                detail.customer_id || null, detail.date || '',
+                detail.subtotal || '', detail.total || '', detail.tax || '',
+                detail.ticket_id || '', detail.pdf_url || '',
+                detail.location_id || '', detail.invoice_id || '',
+                detail.employee || '', JSON.stringify(detail)
+              );
+              if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
+              synced++;
+            } catch (detailErr) {
+              results.errors = results.errors || [];
+              results.errors.push(`estimates/${e.id}: ${detailErr.message}`);
+            }
+          }
+          emitEvent( { phase: 'estimates', status: 'progress', current: synced });
+          await new Promise(r => setTimeout(r, 350));
+        }
+
+        if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
+      }
+
+      if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
+      results.estimates = synced;
+      log('SYNC_ENTITY', `Estimates: ${synced}`);
+      emitEvent( { phase: 'estimates', status: 'done', count: synced });
+    } catch (e) {
+      results.errors = results.errors || [];
+      results.errors.push(`estimates: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent( { phase: 'estimates', status: 'error', error: e.message });
+    }
+  }
+
+  // ─── Purchase orders sync ────────────────────────────────────────────────────
+
+  async function syncPurchaseOrders() {
+    emitEvent( { phase: 'purchase_orders', status: 'started' });
+    const localMax = forceAll ? null : (getSetting('last_sync') || null);
+    try {
+      const page1 = await fetchJson(`${baseUrl}/purchase_orders?page=1&per_page=100`, 'purchase_orders');
+      let totalPages = page1.meta?.total_pages || 1;
+      let latestUpdatedAt = localMax;
+      let synced = 0;
+
+      for (let page = 1; page <= totalPages; page++) {
+        const data = page === 1 ? page1 : await fetchJson(`${baseUrl}/purchase_orders?page=${page}&per_page=100`, 'purchase_orders');
+        const pos = data.purchase_orders || [];
+
+        for (const p of pos) {
+          if (forceAll || !localMax || !p.updated_at || p.updated_at > localMax) {
+            const detailData = await fetchJson(`${baseUrl}/purchase_orders/${p.id}`, 'purchase_orders');
+            const detail = detailData.purchase_order || detailData;
+            db.prepare(`
+              INSERT OR REPLACE INTO purchase_orders (id, account_subdomain, created_at, updated_at, expected_date, number, other, shipping, shipping_notes, status, total, user_id, vendor_id, location_id, due_date, paid_date, delivery_tracking, vendor, location, line_items, raw_json, synced)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            `).run(
+              detail.id, detail.account_subdomain || '', detail.created_at || '', detail.updated_at || '',
+              detail.expected_date || '', detail.number || '',
+              detail.other || '', detail.shipping || '', detail.shipping_notes || '',
+              detail.status || '', detail.total || '', detail.user_id || '',
+              detail.vendor_id || null, detail.location_id || '',
+              detail.due_date || '', detail.paid_date || '',
+              detail.delivery_tracking || '',
+              JSON.stringify(detail.vendor || {}), JSON.stringify(detail.location || {}),
+              JSON.stringify(detail.line_items || []), JSON.stringify(detail)
+            );
+            if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
+          }
+          synced++;
+          emitEvent( { phase: 'purchase_orders', status: 'progress', current: synced });
+          await new Promise(r => setTimeout(r, 350));
+        }
+
+        if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
+      }
+
+      if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
+      results.purchase_orders = synced;
+      log('SYNC_ENTITY', `Purchase orders: ${synced}`);
+      emitEvent( { phase: 'purchase_orders', status: 'done', count: synced });
+    } catch (e) {
+      results.errors = results.errors || [];
+      results.errors.push(`purchase_orders: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent( { phase: 'purchase_orders', status: 'error', error: e.message });
+    }
+  }
+
+  // ─── Vendors sync ────────────────────────────────────────────────────────────
+
+  async function syncVendors() {
+    emitEvent( { phase: 'vendors', status: 'started' });
+    const localMax = forceAll ? null : (getSetting('last_sync') || null);
+    try {
+      const page1 = await fetchJson(`${baseUrl}/vendors?page=1&per_page=100`, 'vendors');
+      let totalPages = page1.meta?.total_pages || 1;
+      let latestUpdatedAt = localMax;
+      let synced = 0;
+
+      for (let page = 1; page <= totalPages; page++) {
+        const data = page === 1 ? page1 : await fetchJson(`${baseUrl}/vendors?page=${page}&per_page=100`, 'vendors');
+        const vendors = data.vendors || [];
+
+        for (const v of vendors) {
+          if (forceAll || !localMax || !v.updated_at || v.updated_at > localMax) {
+            const detailData = await fetchJson(`${baseUrl}/vendors/${v.id}`, 'vendors');
+            const detail = detailData.vendor || detailData;
+            db.prepare(`
+              INSERT OR REPLACE INTO vendors (id, name, rep_first_name, rep_last_name, email, phone, account_number, created_at, updated_at, address, city, state, zip, website, notes, raw_json, synced)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            `).run(
+              detail.id, detail.name || '',
+              detail.rep_first_name || '', detail.rep_last_name || '',
+              detail.email || '', detail.phone || '',
+              detail.account_number || '',
+              detail.created_at || '', detail.updated_at || '',
+              detail.address || '', detail.city || '',
+              detail.state || '', detail.zip || '',
+              detail.website || '', detail.notes || '', JSON.stringify(detail)
+            );
+            if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
+          }
+          synced++;
+          emitEvent( { phase: 'vendors', status: 'progress', current: synced });
+          await new Promise(r => setTimeout(r, 350));
+        }
+
+        if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
+      }
+
+      if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
+      results.vendors = synced;
+      log('SYNC_ENTITY', `Vendors: ${synced}`);
+      emitEvent( { phase: 'vendors', status: 'done', count: synced });
+    } catch (e) {
+      results.errors = results.errors || [];
+      results.errors.push(`vendors: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent( { phase: 'vendors', status: 'error', error: e.message });
+    }
+  }
+
+  // ─── Run all entity syncs ───────────────────────────────────────────────────
+
+  try {
+    for (const ent of entitiesToRun) {
+      if (ent === 'tickets') await syncTickets();
+      else if (ent === 'customers') await syncCustomers();
+      else if (ent === 'contacts') await syncContacts();
+      else if (ent === 'invoices') await syncInvoices();
+      else if (ent === 'assets') await syncAssets();
+      else if (ent === 'estimates') await syncEstimates();
+      else if (ent === 'purchase_orders') await syncPurchaseOrders();
+      else if (ent === 'vendors') await syncVendors();
+    }
+
+    results.duration = Date.now() - startTime;
+    log('SYNC_COMPLETE', `Sync complete — ${JSON.stringify(results)}, errors: ${(results.errors || []).length}`);
+    emitEvent( { phase: 'done', results });
+  } catch (e) {
+    log('SYNC_ERROR', e.message);
+    emitEvent( { phase: 'error', error: e.message, results });
+  } finally {
+    syncAbort.current = null;
+  }
+}
+
+// ─── API: Cancel sync ─────────────────────────────────────────────────────────
+
 router.delete('/trigger', (req, res) => {
-  // The ongoing sync checks res.aborted flag and exits early
-  // This endpoint just acknowledges the cancel request
+  // Abort any in-progress fetch calls
+  const ctrl = getSyncAbortController();
+  try { ctrl.abort(); } catch (_) {}
+  syncAbort.current = null;
+  // Reset DB state for all entities
+  const entities = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors'];
+  for (const ent of entities) {
+    const state = getSyncState(ent);
+    if (state.phase !== 'idle' && state.phase !== 'error') {
+      state.phase = 'idle';
+      state.detail_cursor = null;
+      state.detail_synced = 0;
+      saveSyncState(state);
+    }
+  }
   res.json({ cancelled: true });
 });
 
-// PATCH /api/sync/synced - toggle synced flag for a record
-// Body: { table: string, id: number, synced: boolean }
+// ─── API: Reset sync state ───────────────────────────────────────────────────
+
+router.post('/reset', (req, res) => {
+  const { entity } = req.body;
+  const entities = entity ? [entity] : ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors'];
+  for (const ent of entities) {
+    const state = getSyncState(ent);
+    state.phase = 'idle';
+    state.total_pages = 0;
+    state.last_page_synced = 0;
+    state.detail_cursor = null;
+    state.detail_total = 0;
+    state.detail_synced = 0;
+    saveSyncState(state);
+  }
+  res.json({ ok: true });
+});
+
+// ─── API: Toggle synced flag ──────────────────────────────────────────────────
+
 router.patch('/synced', (req, res) => {
   const { table, id, synced } = req.body;
   const allowedTables = ['customers', 'contacts', 'tickets', 'assets', 'invoices', 'estimates', 'purchase_orders', 'vendors'];
@@ -1020,15 +1139,6 @@ router.patch('/synced', (req, res) => {
     res.json({ success: true, table, id, synced });
   } catch (e) {
     res.status(500).json({ error: e.message });
-  }
-});
-
-// GET /api/sync/trigger?status=1 - check if a sync is currently running
-router.get('/trigger', (req, res) => {
-  if (req.query.status) {
-    // Return whether sync is running — always returns false since we can't track
-    // per-connection state persistently. The frontend reconnects via SSE.
-    res.json({ running: false });
   }
 });
 
