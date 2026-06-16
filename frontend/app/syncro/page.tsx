@@ -66,6 +66,8 @@ export default function SyncroPage() {
   const lastEventRef = useRef<Record<string, string>>({});
   // Prevent duplicate in-flight syncs
   const syncsInFlight = useRef<Set<string>>(new Set());
+  // Track whether a sync has already been finalized (done/error) to avoid xhr.onerror overwriting done
+  const syncFinalizedRef = useRef<Record<string, boolean>>({});
 
   // Polling interval ref for background sync state
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -101,11 +103,12 @@ export default function SyncroPage() {
           saveSyncProgress(mergedProgress);
           setSyncAllSyncing(true);
           // Restore buffered SSE events from sessionStorage so View Terminal works
-          const storedEventsRaw = sessionStorage.getItem('syncEvents:entity:all');
-          const storedEvents: string[] = storedEventsRaw ? JSON.parse(storedEventsRaw) : [];
-          setActiveSyncs({ 'entity:all': { phase: 'all', xhr: null, buffer: '', storedEvents } });
           const savedKey = loadActiveSyncKey();
-          if (savedKey && savedKey.startsWith('entity:')) setSelectedSyncKey(savedKey);
+          const syncKey = savedKey || 'entity:all';
+          const storedEventsRaw = sessionStorage.getItem(`syncEvents:${syncKey}`);
+          const storedEvents: string[] = storedEventsRaw ? JSON.parse(storedEventsRaw) : [];
+          setActiveSyncs({ [syncKey]: { phase: syncKey === 'entity:all' ? 'all' : (syncKey.replace('entity:', '') as Phase), xhr: null, buffer: '', storedEvents } });
+          setSelectedSyncKey(syncKey);
           // Start polling immediately to keep UI updated (SSE won't reconnect without user action)
           startProgressPolling();
           return;
@@ -228,28 +231,31 @@ export default function SyncroPage() {
     if (selectedSyncKey === key) setSelectedSyncKey(null);
   }
 
-  function handleEntityProgress(phase: Phase, data: any) {
+  function handleEntityProgress(phase: Phase, data: any, key: string) {
     // Deduplicate SSE events per phase
     const eventKey = `${data.phase || ''}:${data.status || ''}:${data.current || ''}:${data.count || ''}:${data.error || ''}`;
     if (lastEventRef.current[phase] === eventKey) return;
     lastEventRef.current[phase] = eventKey;
 
     if (data.type === 'cancelled' || data.status === 'cancelled') {
+      syncFinalizedRef.current[key] = true;
       setEntityStatus(prev => ({ ...prev, [phase]: { phase, status: 'cancelled' } }));
       return;
     }
     if (data.phase === 'done') {
+      syncFinalizedRef.current[key] = true;
       setEntityStatus(prev => ({ ...prev, [phase]: { phase, status: 'done', count: data.results?.[phase] || 0 } }));
       return;
     }
     if (data.phase === 'error') {
+      syncFinalizedRef.current[key] = true;
       setEntityStatus(prev => ({ ...prev, [phase]: { phase, status: 'error', error: data.error } }));
       return;
     }
     if (data.status === 'progress') {
       setEntityStatus(prev => ({
         ...prev,
-        [phase]: { phase, status: 'started', message: `${data.current}/${data.total}` },
+        [phase]: { phase, status: 'started', message: data.total != null ? `${data.current}/${data.total}` : `${data.current}` },
       }));
       return;
     }
@@ -274,6 +280,7 @@ export default function SyncroPage() {
     lastEventRef.current['all'] = eventKey;
 
     if (data.type === 'cancelled' || data.status === 'cancelled') {
+      syncFinalizedRef.current['entity:all'] = true;
       setSyncAllSyncing(false);
       const next = { customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null };
       setSyncAllProgress(next);
@@ -282,6 +289,7 @@ export default function SyncroPage() {
       return;
     }
     if (data.phase === 'done' || data.phase === 'error') {
+      syncFinalizedRef.current['entity:all'] = true;
       setSyncAllSyncing(false);
       sessionStorage.removeItem('syncProgress');
       if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
@@ -294,11 +302,11 @@ export default function SyncroPage() {
       const phase = data.phase as Phase;
       let message = '';
       if (phase === 'tickets' && data.subphase === 'catalog') {
-        message = `catalog page ${data.page}/${data.totalPages}`;
+        message = `catalog page ${data.current}/${data.total}`;
       } else if (phase === 'tickets' && data.subphase === 'detail') {
         message = `detail ${data.current}/${data.total}`;
       } else {
-        message = `${data.current}/${data.total}`;
+        message = data.total != null ? `${data.current}/${data.total}` : `${data.current}`;
       }
       setSyncAllProgress(prev => {
         const next = { ...prev, [phase]: { phase, status: 'started', message } };
@@ -345,7 +353,7 @@ export default function SyncroPage() {
   }
 
   // Sync a single entity phase
-  function handleSyncEntity(phase: Phase, limit?: number, forceAll?: boolean) {
+  function handleSyncEntity(phase: Phase, forceAll?: boolean) {
     const key = `entity:${phase}${forceAll ? ':force' : ''}`;
     if (syncsInFlight.current.has(key)) return; // prevent duplicate
     syncsInFlight.current.add(key);
@@ -371,7 +379,7 @@ export default function SyncroPage() {
         if (line.startsWith('data: ')) {
           try {
             const data = JSON.parse(line.slice(6));
-            handleEntityProgress(phase, data);
+            handleEntityProgress(phase, data, key);
             storedEvents = [...storedEvents, line].slice(-500);
             sessionStorage.setItem(`syncEvents:${key}`, JSON.stringify(storedEvents));
           } catch (_) {}
@@ -409,7 +417,7 @@ export default function SyncroPage() {
       if (selectedSyncKey === key) setSelectedSyncKey(null);
       fetchStatus();
     };
-    xhr.send(JSON.stringify({ entity: phase, limit }));
+    xhr.send(JSON.stringify({ entity: phase }));
   }
 
   // Sync All
@@ -451,6 +459,9 @@ export default function SyncroPage() {
 
     xhr.onload = () => {
       syncsInFlight.current.delete(key);
+      if (!syncFinalizedRef.current[key]) {
+        syncFinalizedRef.current[key] = true;
+      }
       if (xhr.status === 409) {
         // Sync already running — poll progress endpoint
         const err = JSON.parse(xhr.responseText);
@@ -490,6 +501,8 @@ export default function SyncroPage() {
       });
       sessionStorage.removeItem(`syncEvents:${key}`);
       sessionStorage.removeItem('syncProgress');
+      if (syncFinalizedRef.current[key]) return;
+      syncFinalizedRef.current[key] = true;
       setSyncAllSyncing(false);
       if (selectedSyncKey === key) setSelectedSyncKey(null);
     };
@@ -600,11 +613,15 @@ export default function SyncroPage() {
             <div className="grid grid-cols-1 gap-2 mb-4">
               {ENTITY_PHASES.map(phase => {
                 const syncing = !!activeSyncs[`entity:${phase}`];
-                const progress = entityStatus[phase];
+                const progress = entityStatus[phase] || syncAllProgress[phase];
                 const isRunning = syncing;
 
                 return (
                   <div key={phase} className="flex items-center gap-2">
+                    <span className={`text-sm w-4 text-center ${phaseColor(progress)}`}>
+                      {phaseIcon(progress)}
+                    </span>
+                    <span className="text-sm text-gray-700 w-32">{PHASE_LABELS[phase]}</span>
                     <button
                       onClick={() => handleSyncEntity(phase)}
                       disabled={isRunning}
@@ -616,21 +633,18 @@ export default function SyncroPage() {
                       {isRunning ? 'Syncing...' : 'Sync'}
                     </button>
                     <button
-                      onClick={() => handleSyncEntity(phase, undefined, true)}
+                      onClick={() => handleSyncEntity(phase, true)}
                       disabled={!!activeSyncs[`entity:${phase}:force`]}
                       className="px-3 py-1.5 rounded text-sm border border-orange-300 text-orange-700 bg-orange-50 hover:bg-orange-100 disabled:opacity-50"
                       title="Re-sync all records regardless of last sync time"
                     >
                       Re-sync
                     </button>
-                    <span className={`text-sm ${phaseColor(progress)}`}>
-                      {phaseIcon(progress)} {PHASE_LABELS[phase]}
-                    </span>
                     {progress?.status === 'started' && (
-                      <span className="text-xs text-gray-500">{progress.message}</span>
+                      <span className="text-xs text-blue-600">{progress.message}</span>
                     )}
                     {progress?.status === 'done' && (
-                      <span className="text-xs text-gray-500">({progress.count})</span>
+                      <span className="text-xs text-gray-500">done ({progress.count})</span>
                     )}
                     {progress?.status === 'error' && (
                       <span className="text-xs text-red-500">{progress.error}</span>
@@ -638,24 +652,12 @@ export default function SyncroPage() {
                     {progress?.status === 'cancelled' && (
                       <span className="text-xs text-orange-500">Cancelled</span>
                     )}
+                    {progress?.status === 'conflict' && (
+                      <span className="text-xs text-red-600 font-bold">{progress.message}</span>
+                    )}
                   </div>
                 );
               })}
-            </div>
-
-            {/* Test Sync — 10 most recent per entity */}
-            <div className="flex flex-wrap gap-2 mb-6">
-              {ENTITY_PHASES.map(phase => (
-                <button
-                  key={phase}
-                  onClick={() => handleSyncEntity(phase, 10)}
-                  disabled={!!activeSyncs[`entity:${phase}`]}
-                  className="bg-blue-50 border border-blue-200 text-blue-700 px-3 py-1.5 rounded text-sm hover:bg-blue-100 disabled:opacity-50"
-                >
-                  Test (10 {PHASE_LABELS[phase]})
-                </button>
-              ))}
-              <span className="text-xs text-gray-500 self-center">Syncs 10 most recent records per entity</span>
             </div>
 
             {/* Sync All */}
@@ -706,25 +708,6 @@ export default function SyncroPage() {
                 </button>
               </div>
 
-              {(activeSyncs['entity:all'] || syncAllSyncing) && (
-                <div className="mt-3 space-y-1">
-                  {ENTITY_PHASES.map(phase => (
-                    <div key={phase} className={`flex items-center gap-2 text-sm ${phaseColor(syncAllProgress[phase])}`}>
-                      <span>{phaseIcon(syncAllProgress[phase])}</span>
-                      <span>{PHASE_LABELS[phase]}</span>
-                      {syncAllProgress[phase]?.status === 'done' && (
-                        <span className="text-gray-500 text-xs">({syncAllProgress[phase].count})</span>
-                      )}
-                      {syncAllProgress[phase]?.status === 'started' && (
-                        <span className="text-gray-500 text-xs">{syncAllProgress[phase]?.message}</span>
-                      )}
-                      {syncAllProgress[phase]?.status === 'error' && (
-                        <span className="text-red-500 text-xs">{syncAllProgress[phase]?.error}</span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
 
             {/* Preview */}

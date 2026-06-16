@@ -72,7 +72,14 @@ function saveSyncState(state) {
 
 let liveClients = [];
 
-function emitEvent(data) {
+function clearEventsForEntity(entity) {
+  try {
+    const db = getDb();
+    db.prepare('DELETE FROM sync_events WHERE entity = ?').run(entity);
+  } catch (e) { console.error('clearEventsForEntity error:', e.message); }
+}
+
+function emitEvent(data, res) {
   // Write to DB for polling clients
   try {
     const db = getDb();
@@ -96,9 +103,13 @@ function emitEvent(data) {
     );
   } catch (e) { console.error('emitEvent error:', e.message); }
 
-  // Also push to live SSE clients for http_log events
-  if (data.type === 'http_log' && liveClients.length > 0) {
-    const payload = `data: ${JSON.stringify(data)}\n\n`;
+  const payload = `data: ${JSON.stringify(data)}\n\n`;
+  // Write directly to primary SSE response
+  if (res) {
+    try { res.write(payload); } catch (_) {}
+  }
+  // Also push to live SSE clients (for SyncTerminal fan-out)
+  if (liveClients.length > 0) {
     for (const client of liveClients) {
       try { client.write(payload); } catch (_) {}
     }
@@ -163,7 +174,7 @@ router.get('/progress', (req, res) => {
 
 router.get('/events', (req, res) => {
   const db = getDb();
-  const since = req.query.since || '1970-01-01';
+  const since = (req.query.since || '1970-01-01').replace('T', ' ');
   const events = db.prepare(`
     SELECT * FROM sync_events WHERE created_at > ? ORDER BY id DESC LIMIT 500
   `).all(since);
@@ -318,12 +329,12 @@ router.post('/trigger', async (req, res) => {
   res.write(`data: ${JSON.stringify({ accepted: true, entities: entitiesToRun })}\n\n`);
 
   // Run sync in next tick (non-blocking)
-  setImmediate(() => runSync(entitiesToRun, forceAll, apiKey, subdomain));
+  setImmediate(() => runSync(entitiesToRun, forceAll, apiKey, subdomain, res));
 });
 
 // ─── Sync runner (runs detached from HTTP response) ───────────────────────────
 
-async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
+async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res) {
   const db = getDb();
   const results = {};
   const startTime = Date.now();
@@ -375,7 +386,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
       phase,
       duration_ms: ms,
       body_preview: body.slice(0, 300),
-    });
+    }, res);
 
     if (resp.status === 429) {
       rateLimitHits++;
@@ -393,7 +404,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
         phase,
         duration_ms: Date.now() - start,
         body_preview: retryBody.slice(0, 300),
-      });
+      }, res);
       if (!retry.ok) throw new ApiError(url, 'retry', retry.status, retryBody);
       return { resp: retry, body: retryBody };
     }
@@ -403,8 +414,20 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
   }
 
   async function fetchJson(url, phase) {
-    const { resp, body } = await fetchWithRetry(url, phase);
-    return JSON.parse(body);
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const { resp, body } = await fetchWithRetry(url, phase);
+        if (!body || !body.trim()) throw new ApiError(url, 'empty_body', resp.status, body);
+        return JSON.parse(body);
+      } catch (e) {
+        lastError = e;
+        // Retry once on empty body or parse error (both indicate truncated/invalid response from Syncro)
+        if (attempt === 0 && (e instanceof SyntaxError || (e instanceof ApiError && e.message === 'empty_body'))) continue;
+        throw e;
+      }
+    }
+    throw lastError;
   }
 
   function checkAbort() {
@@ -421,7 +444,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
     // ── Catalog phase ─────────────────────────────────────────────────────────
     state.phase = 'catalog';
     saveSyncState(state);
-    emitEvent( { phase: 'tickets', status: 'started', subphase: 'catalog', message: 'Building ticket catalog...' });
+    emitEvent( { phase: 'tickets', status: 'started', subphase: 'catalog', message: 'Building ticket catalog...' }, res);
 
     try {
       let totalPages = state.total_pages || 0;
@@ -447,6 +470,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
 
         const insertMany = db.transaction((ticketList) => {
           for (const t of ticketList) {
+            if (t.status === 'Resolved') continue;
             db.prepare(`
               INSERT OR REPLACE INTO tickets (id, number, subject, status, created_at, updated_at, raw_json, has_detail, synced_at)
               VALUES (?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
@@ -466,7 +490,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
         state.total_pages = totalPages;
         state.last_page_synced = 1;
         saveSyncState(state);
-        emitEvent( { phase: 'tickets', status: 'progress', subphase: 'catalog', page: 1, totalPages, fetched: tickets.length });
+        emitEvent( { phase: 'tickets', status: 'progress', subphase: 'catalog', current: 1, total: state.total_pages }, res);
 
         if (totalPages === 1 || startPage >= totalPages) {
           return finishCatalog(state, isInitialSync);
@@ -486,6 +510,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
 
         const insertMany = db.transaction((ticketList) => {
           for (const t of ticketList) {
+            if (t.status === 'Resolved') continue;
             db.prepare(`
               INSERT OR REPLACE INTO tickets (id, number, subject, status, created_at, updated_at, raw_json, has_detail, synced_at)
               VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT has_detail FROM tickets WHERE id = ?), 0), datetime('now'))
@@ -506,7 +531,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
         state.total_pages = totalPages;
         state.last_page_synced = page;
         saveSyncState(state);
-        emitEvent( { phase: 'tickets', status: 'progress', subphase: 'catalog', page, totalPages, fetched: tickets.length });
+        emitEvent( { phase: 'tickets', status: 'progress', subphase: 'catalog', current: page, total: state.total_pages }, res);
 
         await new Promise(r => setTimeout(r, 600));
       }
@@ -516,41 +541,41 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
     } catch (e) {
       state.phase = 'error';
       saveSyncState(state);
-      emitEvent( { phase: 'tickets', status: 'error', error: e.message });
+      emitEvent( { phase: 'tickets', status: 'error', error: e.message }, res);
       throw e;
     }
   }
 
   async function finishCatalog(state, isInitialSync) {
-    // Compute detail_total
-    const row = db.prepare("SELECT COUNT(*) as cnt FROM tickets WHERE has_detail = 0").get();
+    // Compute detail_total — count all non-resolved tickets (we re-fetch all every sync)
+    const row = db.prepare("SELECT COUNT(*) as cnt FROM tickets WHERE status != 'Resolved'").get();
     state.detail_total = row.cnt;
     state.detail_cursor = null;
     state.detail_synced = 0;
     state.phase = 'detail';
     state.last_sync = new Date().toISOString();
     saveSyncState(state);
-    emitEvent( { phase: 'tickets', status: 'catalog_done', detailTotal: state.detail_total });
+    emitEvent( { phase: 'tickets', status: 'catalog_done', detailTotal: state.detail_total }, res);
 
     // ── Detail phase ─────────────────────────────────────────────────────────
     await syncTicketDetails(state, isInitialSync);
   }
 
   async function syncTicketDetails(state, isInitialSync) {
-    emitEvent( { phase: 'tickets', status: 'started', subphase: 'detail', message: 'Fetching ticket details...' });
+    emitEvent( { phase: 'tickets', status: 'started', subphase: 'detail', message: 'Fetching ticket details...' }, res);
 
     try {
       let total = state.detail_total;
       let synced = state.detail_synced;
       let cursor = state.detail_cursor;
 
-      // Build query - select tickets without detail
+      // Build query - always re-fetch all non-resolved tickets to catch updates
       let query, params;
       if (!cursor) {
-        query = "SELECT id, status FROM tickets WHERE has_detail = 0 ORDER BY id ASC";
+        query = "SELECT id, status FROM tickets WHERE status != 'Resolved' ORDER BY id ASC";
         params = [];
       } else {
-        query = "SELECT id, status FROM tickets WHERE has_detail = 0 AND id > ? ORDER BY id ASC";
+        query = "SELECT id, status FROM tickets WHERE status != 'Resolved' AND id > ? ORDER BY id ASC";
         params = [cursor];
       }
 
@@ -563,13 +588,13 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
         state.detail_cursor = null;
         state.detail_synced = 0;
         saveSyncState(state);
-        emitEvent( { phase: 'tickets', status: 'done', count: synced });
+        emitEvent( { phase: 'tickets', status: 'done', count: synced }, res);
         return;
       }
 
       // Recalculate total if needed
       if (total === 0) {
-        const row = db.prepare("SELECT COUNT(*) as cnt FROM tickets WHERE has_detail = 0").get();
+        const row = db.prepare("SELECT COUNT(*) as cnt FROM tickets WHERE status != 'Resolved'").get();
         total = row.cnt;
         state.detail_total = total;
         saveSyncState(state);
@@ -642,9 +667,10 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
           subphase: 'detail',
           current: synced,
           total,
+          message: `detail ${synced}/${total}`,
           currentTicketId: detail.id,
           currentTicketNumber: detail.number,
-        });
+        }, res);
 
         await new Promise(r => setTimeout(r, 350));
         checkAbort();
@@ -657,12 +683,13 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
       saveSyncState(state);
       results.tickets = synced;
       log('SYNC_ENTITY', `Tickets detail: ${synced} fetched`);
-      emitEvent( { phase: 'tickets', status: 'done', count: synced });
+      emitEvent( { phase: 'tickets', status: 'done', count: synced }, res);
+      clearEventsForEntity('tickets');
 
     } catch (e) {
       state.phase = 'error';
       saveSyncState(state);
-      emitEvent( { phase: 'tickets', status: 'error', error: e.message });
+      emitEvent( { phase: 'tickets', status: 'error', error: e.message }, res);
       throw e;
     }
   }
@@ -670,7 +697,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
   // ─── Customer sync ───────────────────────────────────────────────────────────
 
   async function syncCustomers() {
-    emitEvent( { phase: 'customers', status: 'started' });
+    emitEvent( { phase: 'customers', status: 'started' }, res);
     const localMax = forceAll ? null : (getSetting('last_sync') || null);
     try {
       const page1 = await fetchJson(`${baseUrl}/customers?page=1&per_page=100`, 'customers');
@@ -705,7 +732,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
             if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
           }
           synced++;
-          emitEvent( { phase: 'customers', status: 'progress', current: synced });
+          emitEvent( { phase: 'customers', status: 'progress', current: synced }, res);
           await new Promise(r => setTimeout(r, 350));
         }
 
@@ -715,19 +742,20 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
       if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
       results.customers = synced;
       log('SYNC_ENTITY', `Customers: ${synced}`);
-      emitEvent( { phase: 'customers', status: 'done', count: synced });
+      emitEvent( { phase: 'customers', status: 'done', count: synced }, res);
+      clearEventsForEntity('customers');
     } catch (e) {
       results.errors = results.errors || [];
       results.errors.push(`customers: ${e.message}`);
       log('SYNC_ERROR', e.message);
-      emitEvent( { phase: 'customers', status: 'error', error: e.message });
+      emitEvent( { phase: 'customers', status: 'error', error: e.message }, res);
     }
   }
 
   // ─── Contacts sync ──────────────────────────────────────────────────────────
 
   async function syncContacts() {
-    emitEvent( { phase: 'contacts', status: 'started' });
+    emitEvent( { phase: 'contacts', status: 'started' }, res);
     const localMax = forceAll ? null : (getSetting('last_sync') || null);
     try {
       const page1 = await fetchJson(`${baseUrl}/contacts?page=1&per_page=100`, 'contacts');
@@ -760,7 +788,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
             if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
           }
           synced++;
-          emitEvent( { phase: 'contacts', status: 'progress', current: synced });
+          emitEvent( { phase: 'contacts', status: 'progress', current: synced }, res);
           await new Promise(r => setTimeout(r, 350));
         }
 
@@ -770,19 +798,20 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
       if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
       results.contacts = synced;
       log('SYNC_ENTITY', `Contacts: ${synced}`);
-      emitEvent( { phase: 'contacts', status: 'done', count: synced });
+      emitEvent( { phase: 'contacts', status: 'done', count: synced }, res);
+      clearEventsForEntity('contacts');
     } catch (e) {
       results.errors = results.errors || [];
       results.errors.push(`contacts: ${e.message}`);
       log('SYNC_ERROR', e.message);
-      emitEvent( { phase: 'contacts', status: 'error', error: e.message });
+      emitEvent( { phase: 'contacts', status: 'error', error: e.message }, res);
     }
   }
 
   // ─── Invoices sync ───────────────────────────────────────────────────────────
 
   async function syncInvoices() {
-    emitEvent( { phase: 'invoices', status: 'started' });
+    emitEvent( { phase: 'invoices', status: 'started' }, res);
     const localMax = forceAll ? null : (getSetting('last_sync') || null);
     try {
       const page1 = await fetchJson(`${baseUrl}/invoices?page=1&per_page=100`, 'invoices');
@@ -815,7 +844,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
             if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
           }
           synced++;
-          emitEvent( { phase: 'invoices', status: 'progress', current: synced });
+          emitEvent( { phase: 'invoices', status: 'progress', current: synced }, res);
           await new Promise(r => setTimeout(r, 350));
         }
 
@@ -825,19 +854,20 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
       if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
       results.invoices = synced;
       log('SYNC_ENTITY', `Invoices: ${synced}`);
-      emitEvent( { phase: 'invoices', status: 'done', count: synced });
+      emitEvent( { phase: 'invoices', status: 'done', count: synced }, res);
+      clearEventsForEntity('invoices');
     } catch (e) {
       results.errors = results.errors || [];
       results.errors.push(`invoices: ${e.message}`);
       log('SYNC_ERROR', e.message);
-      emitEvent( { phase: 'invoices', status: 'error', error: e.message });
+      emitEvent( { phase: 'invoices', status: 'error', error: e.message }, res);
     }
   }
 
   // ─── Assets sync ─────────────────────────────────────────────────────────────
 
   async function syncAssets() {
-    emitEvent( { phase: 'assets', status: 'started' });
+    emitEvent( { phase: 'assets', status: 'started' }, res);
     const localMax = forceAll ? null : (getSetting('last_sync') || null);
     try {
       const page1 = await fetchJson(`${baseUrl}/customer_assets?page=1&per_page=100`, 'assets');
@@ -868,7 +898,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
             if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
           }
           synced++;
-          emitEvent( { phase: 'assets', status: 'progress', current: synced });
+          emitEvent( { phase: 'assets', status: 'progress', current: synced }, res);
           await new Promise(r => setTimeout(r, 350));
         }
 
@@ -878,19 +908,20 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
       if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
       results.assets = synced;
       log('SYNC_ENTITY', `Assets: ${synced}`);
-      emitEvent( { phase: 'assets', status: 'done', count: synced });
+      emitEvent( { phase: 'assets', status: 'done', count: synced }, res);
+      clearEventsForEntity('assets');
     } catch (e) {
       results.errors = results.errors || [];
       results.errors.push(`assets: ${e.message}`);
       log('SYNC_ERROR', e.message);
-      emitEvent( { phase: 'assets', status: 'error', error: e.message });
+      emitEvent( { phase: 'assets', status: 'error', error: e.message }, res);
     }
   }
 
   // ─── Estimates sync ───────────────────────────────────────────────────────────
 
   async function syncEstimates() {
-    emitEvent( { phase: 'estimates', status: 'started' });
+    emitEvent( { phase: 'estimates', status: 'started' }, res);
     const localMax = forceAll ? null : (getSetting('last_sync') || null);
     try {
       const page1 = await fetchJson(`${baseUrl}/estimates?page=1&per_page=100`, 'estimates');
@@ -927,7 +958,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
               results.errors.push(`estimates/${e.id}: ${detailErr.message}`);
             }
           }
-          emitEvent( { phase: 'estimates', status: 'progress', current: synced });
+          emitEvent( { phase: 'estimates', status: 'progress', current: synced }, res);
           await new Promise(r => setTimeout(r, 350));
         }
 
@@ -937,19 +968,20 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
       if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
       results.estimates = synced;
       log('SYNC_ENTITY', `Estimates: ${synced}`);
-      emitEvent( { phase: 'estimates', status: 'done', count: synced });
+      emitEvent( { phase: 'estimates', status: 'done', count: synced }, res);
+      clearEventsForEntity('estimates');
     } catch (e) {
       results.errors = results.errors || [];
       results.errors.push(`estimates: ${e.message}`);
       log('SYNC_ERROR', e.message);
-      emitEvent( { phase: 'estimates', status: 'error', error: e.message });
+      emitEvent( { phase: 'estimates', status: 'error', error: e.message }, res);
     }
   }
 
   // ─── Purchase orders sync ────────────────────────────────────────────────────
 
   async function syncPurchaseOrders() {
-    emitEvent( { phase: 'purchase_orders', status: 'started' });
+    emitEvent( { phase: 'purchase_orders', status: 'started' }, res);
     const localMax = forceAll ? null : (getSetting('last_sync') || null);
     try {
       const page1 = await fetchJson(`${baseUrl}/purchase_orders?page=1&per_page=100`, 'purchase_orders');
@@ -982,7 +1014,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
             if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
           }
           synced++;
-          emitEvent( { phase: 'purchase_orders', status: 'progress', current: synced });
+          emitEvent( { phase: 'purchase_orders', status: 'progress', current: synced }, res);
           await new Promise(r => setTimeout(r, 350));
         }
 
@@ -992,19 +1024,20 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
       if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
       results.purchase_orders = synced;
       log('SYNC_ENTITY', `Purchase orders: ${synced}`);
-      emitEvent( { phase: 'purchase_orders', status: 'done', count: synced });
+      emitEvent( { phase: 'purchase_orders', status: 'done', count: synced }, res);
+      clearEventsForEntity('purchase_orders');
     } catch (e) {
       results.errors = results.errors || [];
       results.errors.push(`purchase_orders: ${e.message}`);
       log('SYNC_ERROR', e.message);
-      emitEvent( { phase: 'purchase_orders', status: 'error', error: e.message });
+      emitEvent( { phase: 'purchase_orders', status: 'error', error: e.message }, res);
     }
   }
 
   // ─── Vendors sync ────────────────────────────────────────────────────────────
 
   async function syncVendors() {
-    emitEvent( { phase: 'vendors', status: 'started' });
+    emitEvent( { phase: 'vendors', status: 'started' }, res);
     const localMax = forceAll ? null : (getSetting('last_sync') || null);
     try {
       const page1 = await fetchJson(`${baseUrl}/vendors?page=1&per_page=100`, 'vendors');
@@ -1036,7 +1069,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
             if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
           }
           synced++;
-          emitEvent( { phase: 'vendors', status: 'progress', current: synced });
+          emitEvent( { phase: 'vendors', status: 'progress', current: synced }, res);
           await new Promise(r => setTimeout(r, 350));
         }
 
@@ -1046,12 +1079,13 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
       if (latestUpdatedAt) setSetting('last_sync', latestUpdatedAt);
       results.vendors = synced;
       log('SYNC_ENTITY', `Vendors: ${synced}`);
-      emitEvent( { phase: 'vendors', status: 'done', count: synced });
+      emitEvent( { phase: 'vendors', status: 'done', count: synced }, res);
+      clearEventsForEntity('vendors');
     } catch (e) {
       results.errors = results.errors || [];
       results.errors.push(`vendors: ${e.message}`);
       log('SYNC_ERROR', e.message);
-      emitEvent( { phase: 'vendors', status: 'error', error: e.message });
+      emitEvent( { phase: 'vendors', status: 'error', error: e.message }, res);
     }
   }
 
@@ -1071,10 +1105,10 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain) {
 
     results.duration = Date.now() - startTime;
     log('SYNC_COMPLETE', `Sync complete — ${JSON.stringify(results)}, errors: ${(results.errors || []).length}`);
-    emitEvent( { phase: 'done', results });
+    emitEvent( { phase: 'done', results }, res);
   } catch (e) {
     log('SYNC_ERROR', e.message);
-    emitEvent( { phase: 'error', error: e.message, results });
+    emitEvent( { phase: 'error', error: e.message, results }, res);
   } finally {
     syncAbort.current = null;
   }
