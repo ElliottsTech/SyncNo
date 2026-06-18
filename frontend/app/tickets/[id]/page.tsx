@@ -101,6 +101,34 @@ export default function TicketDetail() {
             {ticket.due_date && <span>Due: {new Date(ticket.due_date).toLocaleDateString()}</span>}
             {ticket.resolved_at && <span>Resolved: {new Date(ticket.resolved_at).toLocaleString()}</span>}
           </div>
+
+          {ticket.user && typeof ticket.user === 'object' && (
+            <div className="mt-4 flex items-center gap-3 p-3 bg-gray-50 rounded text-sm">
+              {ticket.user.color && (
+                <span
+                  className="w-5 h-5 rounded-full border border-gray-300 shrink-0"
+                  style={{ backgroundColor: '#' + ticket.user.color }}
+                  title="User color"
+                />
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-medium text-gray-900">{ticket.user.full_name || 'Unnamed'}</span>
+                  {ticket.user.group && (
+                    <span className="text-xs text-gray-700 bg-white border px-2 py-0.5 rounded">{ticket.user.group}</span>
+                  )}
+                  {ticket.user['admin?'] && (
+                    <span className="text-xs text-purple-700 bg-purple-100 px-2 py-0.5 rounded">Admin</span>
+                  )}
+                </div>
+                {ticket.user.email && (
+                  <a href={`mailto:${ticket.user.email}`} className="text-blue-600 hover:underline text-xs">
+                    {ticket.user.email}
+                  </a>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         <CollapsibleSection title="Invoices" count={invoices.length}>
@@ -172,7 +200,15 @@ export default function TicketDetail() {
               <tbody>
                 {lineItems.map((li: any, i: number) => (
                   <tr key={i} className="border-b last:border-0">
-                    <td className="py-2">{li.product_name || li.product_id || 'N/A'}</td>
+                    <td className="py-2">
+                      {li.product_id ? (
+                        <Link href={`/products/${li.product_id}`} className="text-blue-600 hover:underline font-medium">
+                          {li.product_name || li.product_id}
+                        </Link>
+                      ) : (
+                        <span className="text-gray-500">{li.product_name || 'N/A'}</span>
+                      )}
+                    </td>
                     <td className="py-2">{li.description || 'N/A'}</td>
                     <td className="py-2">{li.quantity || 0}</td>
                     <td className="py-2">{li.price ? '$' + li.price.toFixed(2) : 'N/A'}</td>

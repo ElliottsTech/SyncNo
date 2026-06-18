@@ -58,6 +58,7 @@ function phaseTag(phase: string): string {
     estimates: 'bg-pink-800 text-pink-200',
     purchase_orders: 'bg-cyan-800 text-cyan-200',
     vendors: 'bg-gray-700 text-gray-200',
+    products: 'bg-teal-800 text-teal-200',
   };
   const c = colors[phase] || 'bg-gray-700 text-gray-200';
   return `{phase:${phase}}`;
@@ -243,6 +244,7 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
         estimates: 'text-pink-400',
         purchase_orders: 'text-cyan-400',
         vendors: 'text-gray-400',
+        products: 'text-teal-400',
       };
       setLines(prev => {
         const next = [...prev, {
@@ -277,6 +279,7 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
       estimates: 'text-pink-400',
       purchase_orders: 'text-cyan-400',
       vendors: 'text-gray-400',
+      products: 'text-teal-400',
     };
     return colors[phase] || 'text-gray-400';
   };

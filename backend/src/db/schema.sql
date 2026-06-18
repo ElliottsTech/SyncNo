@@ -227,7 +227,34 @@ CREATE TABLE IF NOT EXISTS products (
   vendor_ids TEXT,
   long_description TEXT,
   location_quantities TEXT,
-  photos TEXT
+  photos TEXT,
+  since_updated_at TEXT,
+  created_at TEXT,
+  updated_at TEXT DEFAULT (datetime('now')),
+  synced INTEGER DEFAULT 0,
+  raw_json TEXT,
+  deleted_at TEXT DEFAULT NULL
+);
+
+CREATE TABLE IF NOT EXISTS product_categories (
+  id INTEGER PRIMARY KEY,
+  account_id TEXT,
+  ancestry TEXT,
+  name TEXT,
+  description TEXT,
+  device_product_id TEXT,
+  names_depth_cache TEXT,
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS product_serials (
+  id INTEGER PRIMARY KEY,
+  product_id INTEGER,
+  serial_number TEXT,
+  account_id TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS purchase_orders (
@@ -305,6 +332,11 @@ CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
 CREATE INDEX IF NOT EXISTS idx_ticket_comments_ticket ON ticket_comments(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_ticket_time_entries_ticket ON ticket_time_entries(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_ticket_line_items_ticket ON ticket_line_items(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
+CREATE INDEX IF NOT EXISTS idx_products_category ON products(product_category);
+CREATE INDEX IF NOT EXISTS idx_product_categories_ancestry ON product_categories(ancestry);
+CREATE INDEX IF NOT EXISTS idx_product_serials_product ON product_serials(product_id);
+CREATE INDEX IF NOT EXISTS idx_ticket_line_items_product ON ticket_line_items(product_id);
 
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,

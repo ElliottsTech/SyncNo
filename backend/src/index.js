@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import jwt from 'jsonwebtoken';
+import { decode as decodeJwt } from 'next-auth/jwt';
 import { initDb } from './db/database.js';
 import customersRouter from './routes/customers.js';
 import ticketsRouter from './routes/tickets.js';
@@ -10,6 +10,7 @@ import searchRouter from './routes/search.js';
 import estimatesRouter from './routes/estimates.js';
 import purchaseOrdersRouter from './routes/purchaseOrders.js';
 import assetsRouter from './routes/assets.js';
+import productsRouter from './routes/products.js';
 import usersRouter from './routes/users.js';
 import logsRouter from './routes/logs.js';
 import syncRouter from './routes/sync.js';
@@ -20,12 +21,15 @@ import { dirname, join } from 'path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, '..', '.env');
 const env = Object.fromEntries(
-  readFileSync(envPath, 'utf8').trim().split('\n').map(l => l.split('='))
+  readFileSync(envPath, 'utf8').trim().split('\n').map(l => {
+    const i = l.indexOf('=');
+    return i === -1 ? [l] : [l.slice(0, i), l.slice(i + 1)];
+  })
 );
 for (const [key, value] of Object.entries(env)) {
   if (process.env[key] === undefined) process.env[key] = value;
 }
-const NEXTAUTH_SECRET = env.NEXTAUTH_SECRET;
+const NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET;
 
 const app = express();
 const PORT = 3002;
@@ -33,18 +37,18 @@ const PORT = 3002;
 app.use(cors());
 app.use(express.json());
 
-// Verify NextAuth JWT session
-app.use((req, res, next) => {
+// Verify NextAuth JWT session (JWE-encrypted cookie)
+app.use(async (req, res, next) => {
   const cookieHeader = req.headers.cookie;
   if (cookieHeader) {
     const match = cookieHeader.match(/__Secure-next-auth\.session-token=([^;]+)/);
     if (match) {
       try {
-        const token = match[1];
-        // Remove surrounding braces if present (v4 format)
-        const cleanToken = token.startsWith('{') ? token : token;
-        const decoded = jwt.verify(cleanToken, NEXTAUTH_SECRET);
-        req.user = decoded;
+        const decoded = await decodeJwt({
+          token: match[1],
+          secret: NEXTAUTH_SECRET,
+        });
+        if (decoded) req.user = decoded;
       } catch (e) {
         // Invalid token - allow request but no user
       }
@@ -52,6 +56,13 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+function requireAdmin(req, res, next) {
+  if (req.user?.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin only' });
+  }
+  next();
+}
 
 // Initialize DB on startup
 initDb();
@@ -65,6 +76,7 @@ app.use('/api/search', searchRouter);
 app.use('/api/estimates', estimatesRouter);
 app.use('/api/purchase-orders', purchaseOrdersRouter);
 app.use('/api/assets', assetsRouter);
+app.use('/api/products', productsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/logs', logsRouter);
 app.use('/api/sync', syncRouter);

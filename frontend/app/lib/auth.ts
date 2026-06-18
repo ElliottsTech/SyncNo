@@ -1,6 +1,18 @@
 import { NextAuthOptions } from 'next-auth';
 
 const API = process.env.NEXT_PUBLIC_API_URL || '/api';
+const ROLE_REFRESH_MS = 5 * 60 * 1000;
+
+async function fetchRole(userId: string): Promise<'admin' | 'user' | null> {
+  try {
+    const r = await fetch(`${API}/users/${encodeURIComponent(userId)}/role`);
+    if (!r.ok) return null;
+    const data = await r.json();
+    return data.role === 'admin' ? 'admin' : 'user';
+  } catch {
+    return null;
+  }
+}
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -31,10 +43,9 @@ export const authOptions: NextAuthOptions = {
   },
   session: { strategy: 'jwt' },
   callbacks: {
-    async signIn({ user, account, profile }: any) {
+    async signIn({ user, account }: any) {
       if (account?.provider === 'azure-ad' && user?.email) {
         try {
-          // Upsert user
           await fetch(`${API}/users/upsert`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -44,27 +55,38 @@ export const authOptions: NextAuthOptions = {
               name: user.name,
             }),
           });
-
-          // Update last login
-          await fetch(`${API}/users/${user.id}/last-login`, { method: 'PUT' });
         } catch (e) {
-          console.error('Auth callback error:', e);
+          console.error('Auth upsert error:', e);
         }
       }
       return true;
     },
-    async jwt({ token, account, user }: any) {
-      if (account) {
-        token.accessToken = account.access_token;
-      }
-      if (user) {
+    async jwt({ token, account, user, trigger }: any) {
+      if (account && user) {
         token.id = user.id;
+        const role = await fetchRole(user.id);
+        token.role = role || 'user';
+        token.roleCheckedAt = Date.now();
+      } else {
+        const now = Date.now();
+        const last = token.roleCheckedAt || 0;
+        if (!token.role || now - last > ROLE_REFRESH_MS) {
+          const role = token.id ? await fetchRole(token.id as string) : null;
+          if (role) token.role = role;
+          token.roleCheckedAt = now;
+        }
+      }
+      if (trigger === 'update') {
+        const role = token.id ? await fetchRole(token.id as string) : null;
+        if (role) token.role = role;
+        token.roleCheckedAt = Date.now();
       }
       return token;
     },
     async session({ session, token }: any) {
       if (session.user) {
         session.user.id = token.sub;
+        session.user.role = token.role || 'user';
       }
       return session;
     },

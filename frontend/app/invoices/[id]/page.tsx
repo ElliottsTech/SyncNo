@@ -29,7 +29,10 @@ export default function InvoiceDetail() {
   if (!invoice) return <p className="text-gray-500">Loading...</p>;
 
   const raw = invoice.raw_json ? (typeof invoice.raw_json === 'string' ? JSON.parse(invoice.raw_json) : invoice.raw_json) : null;
-  const lineItems = raw?.line_items || [];
+  // Prefer enriched line_items from backend (product_name resolved), fall back to raw
+  const lineItems = Array.isArray(invoice.line_items) && invoice.line_items.length > 0
+    ? invoice.line_items
+    : (raw?.line_items || []);
   const customer = raw?.customer;
   const hasBusiness = customer?.business_name && customer?.business_name !== customer?.fullname;
   const displayName = hasBusiness
@@ -156,7 +159,15 @@ export default function InvoiceDetail() {
               <tbody className="divide-y">
                 {lineItems.map((li: any, i: number) => (
                   <tr key={i}>
-                    <td className="px-4 py-3">{li.product_name || li.name || 'N/A'}</td>
+                    <td className="px-4 py-3">
+                      {li.product_id ? (
+                        <Link href={`/products/${li.product_id}`} className="text-blue-600 hover:underline font-medium">
+                          {li.product_name || li.name || li.product_id}
+                        </Link>
+                      ) : (
+                        <span>{li.product_name || li.name || 'N/A'}</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3">{li.description || '—'}</td>
                     <td className="px-4 py-3">{li.quantity || 1}</td>
                     <td className="px-4 py-3">${parseFloat(li.price || li.unit_price || 0).toFixed(2)}</td>

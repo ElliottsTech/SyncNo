@@ -1,5 +1,7 @@
 'use client';
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useSession } from 'next-auth/react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import SyncTerminal from '@/components/SyncTerminal';
 import type { HttpLogEntry } from '@/components/SyncTerminal';
@@ -10,7 +12,7 @@ const API = (typeof window !== 'undefined' && window.location.port === '3001')
   ? 'http://localhost:3002/api'  // local Docker: browser→frontend:3001 but sync→backend:3002
   : '/api';  // fallback: use proxy (auth required)
 
-type Phase = 'customers' | 'contacts' | 'tickets' | 'invoices' | 'assets' | 'estimates' | 'purchase_orders' | 'vendors';
+type Phase = 'customers' | 'contacts' | 'tickets' | 'invoices' | 'assets' | 'estimates' | 'purchase_orders' | 'vendors' | 'products';
 
 type PhaseProgress = {
   phase: Phase;
@@ -26,7 +28,7 @@ type LastResult = {
   last_sync: string | null;
 };
 
-const ENTITY_PHASES: Phase[] = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors'];
+const ENTITY_PHASES: Phase[] = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
 
 const PHASE_LABELS: Record<Phase, string> = {
   customers: 'Customers',
@@ -37,6 +39,7 @@ const PHASE_LABELS: Record<Phase, string> = {
   estimates: 'Estimates',
   purchase_orders: 'Purchase Orders',
   vendors: 'Vendors',
+  products: 'Products',
 };
 
 type ActiveSync = {
@@ -46,13 +49,124 @@ type ActiveSync = {
   storedEvents: string[];  // SSE event lines persisted to sessionStorage
 };
 
+function SchedulerSection() {
+  const [schedule, setSchedule] = useState<Record<string, { time: string; enabled: boolean; last_fired: string | null }>>({});
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch(`${API}/sync/schedule`)
+      .then(r => r.json())
+      .then(data => {
+        const s = data.schedule || {};
+        setSchedule(s);
+        const d: Record<string, string> = {};
+        for (const ent of ENTITY_PHASES) {
+          d[ent] = s[ent]?.time || '';
+        }
+        setDraft(d);
+      })
+      .catch(e => setError(e.message));
+  }, []);
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      const payload: Record<string, string> = {};
+      for (const ent of ENTITY_PHASES) {
+        payload[ent] = (draft[ent] || '').trim();
+      }
+      const res = await fetch(`${API}/sync/schedule`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schedule: payload }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'save failed');
+      setSchedule(data.schedule || {});
+      setSavedAt(Date.now());
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function fmtLastFired(s: string | null) {
+    if (!s) return 'never';
+    return s;
+  }
+
+  return (
+    <div className="bg-white rounded border p-4 mb-4">
+      <div className="flex items-baseline justify-between mb-3">
+        <h2 className="font-semibold">Scheduler</h2>
+        <span className="text-xs text-gray-500">Daily delta sync per entity (server local time)</span>
+      </div>
+      <div className="grid grid-cols-1 gap-2">
+        {ENTITY_PHASES.map(phase => {
+          const cfg = schedule[phase] || { time: '', enabled: false, last_fired: null };
+          const draftVal = draft[phase] ?? '';
+          return (
+            <div key={phase} className="flex items-center gap-3 text-sm">
+              <span className="text-gray-700 w-32">{PHASE_LABELS[phase]}</span>
+              <input
+                type="time"
+                value={draftVal}
+                onChange={e => setDraft(prev => ({ ...prev, [phase]: e.target.value }))}
+                className="px-2 py-1 border rounded font-mono text-sm"
+              />
+              {cfg.enabled ? (
+                <span className="text-xs text-green-600">scheduled {cfg.time}</span>
+              ) : (
+                <span className="text-xs text-gray-400">disabled</span>
+              )}
+              <span className="text-xs text-gray-400">last: {fmtLastFired(cfg.last_fired)}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-3 mt-4">
+        <button
+          onClick={save}
+          disabled={saving}
+          className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700 disabled:opacity-50"
+        >
+          {saving ? 'Saving...' : 'Save Schedule'}
+        </button>
+        {savedAt && !error && (
+          <span className="text-xs text-green-600">Saved ✓</span>
+        )}
+        {error && (
+          <span className="text-xs text-red-600">{error}</span>
+        )}
+        <span className="text-xs text-gray-500 ml-auto">
+          Empty time = disabled. Scheduler checks every minute; fires once per day per entity.
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export default function SyncroPage() {
+  const { data: session, status: authStatus } = useSession();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (authStatus === 'authenticated' && session?.user?.role !== 'admin') {
+      router.replace('/');
+    }
+  }, [authStatus, session, router]);
+
   const [status, setStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   const [entityStatus, setEntityStatus] = useState<Record<Phase, PhaseProgress | null>>({
     customers: null, contacts: null, tickets: null, invoices: null,
-    assets: null, estimates: null, purchase_orders: null, vendors: null,
+    assets: null, estimates: null, purchase_orders: null, vendors: null, products: null,
   });
 
   const [lastResults, setLastResults] = useState<Record<Phase, LastResult>>({
@@ -64,12 +178,13 @@ export default function SyncroPage() {
     estimates: { count: 0, error: null, last_sync: null },
     purchase_orders: { count: 0, error: null, last_sync: null },
     vendors: { count: 0, error: null, last_sync: null },
+    products: { count: 0, error: null, last_sync: null },
   });
 
   const [syncAllSyncing, setSyncAllSyncing] = useState(false);
   const [syncAllProgress, setSyncAllProgress] = useState<Record<Phase, PhaseProgress | null>>({
     customers: null, contacts: null, tickets: null, invoices: null,
-    assets: null, estimates: null, purchase_orders: null, vendors: null,
+    assets: null, estimates: null, purchase_orders: null, vendors: null, products: null,
   });
 
   const [previewing, setPreviewing] = useState(false);
@@ -98,7 +213,7 @@ export default function SyncroPage() {
       .then(r => r.json())
       .then(data => {
         // Check if any entity has a non-idle phase
-        const states = [data.tickets, data.customers, data.contacts, data.invoices, data.assets, data.estimates, data.purchase_orders, data.vendors];
+        const states = [data.tickets, data.customers, data.contacts, data.invoices, data.assets, data.estimates, data.purchase_orders, data.vendors, data.products];
         const anyRunning = states.some(s => s && s.phase && s.phase !== 'idle' && s.phase !== 'error');
 
         if (anyRunning) {
@@ -115,6 +230,7 @@ export default function SyncroPage() {
             estimates: buildProgressFromState('estimates', data.estimates),
             purchase_orders: buildProgressFromState('purchase_orders', data.purchase_orders),
             vendors: buildProgressFromState('vendors', data.vendors),
+            products: buildProgressFromState('products', data.products),
           };
           // Prefer sessionStorage progress if available, otherwise use backend state (never null)
           const mergedProgress = storedProgress || backendProgress;
@@ -165,7 +281,7 @@ export default function SyncroPage() {
         syncsInFlight.current.clear();
         sessionStorage.removeItem('activeSyncs');
         setSyncAllSyncing(false);
-        setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null });
+        setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null });
         // Restore completedSync from sessionStorage so View Terminal still works after refresh
         const savedKey = loadActiveSyncKey();
         if (savedKey) {
@@ -211,13 +327,13 @@ export default function SyncroPage() {
       try {
         const res = await fetch(`${API}/sync/progress`);
         const data = await res.json();
-        const states = [data.tickets, data.customers, data.contacts, data.invoices, data.assets, data.estimates, data.purchase_orders, data.vendors];
+        const states = [data.tickets, data.customers, data.contacts, data.invoices, data.assets, data.estimates, data.purchase_orders, data.vendors, data.products];
         const anyRunning = states.some(s => s && s.phase && s.phase !== 'idle' && s.phase !== 'error');
         if (!anyRunning) {
           clearInterval(pollIntervalRef.current!);
           pollIntervalRef.current = null;
           setSyncAllSyncing(false);
-          setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null });
+          setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null });
           setActiveSyncs({});
           fetchStatus();
           return;
@@ -231,6 +347,7 @@ export default function SyncroPage() {
           estimates: buildProgressFromState('estimates', data.estimates),
           purchase_orders: buildProgressFromState('purchase_orders', data.purchase_orders),
           vendors: buildProgressFromState('vendors', data.vendors),
+            products: buildProgressFromState('products', data.products),
         });
       } catch (_) {}
     }, 3000);
@@ -280,6 +397,7 @@ export default function SyncroPage() {
           estimates: data.estimates || { count: 0, error: null, last_sync: null },
           purchase_orders: data.purchase_orders || { count: 0, error: null, last_sync: null },
           vendors: data.vendors || { count: 0, error: null, last_sync: null },
+          products: data.products || { count: 0, error: null, last_sync: null },
         });
       })
       .catch(() => {});
@@ -326,7 +444,7 @@ export default function SyncroPage() {
     });
     if (isAll) {
       setSyncAllSyncing(false);
-      setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null });
+      setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null });
       sessionStorage.removeItem('syncProgress');
       if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
     } else if (phase && phase !== 'all') {
@@ -421,7 +539,7 @@ export default function SyncroPage() {
     if (data.type === 'cancelled' || data.status === 'cancelled') {
       syncFinalizedRef.current['entity:all'] = true;
       setSyncAllSyncing(false);
-      const next = { customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null };
+      const next = { customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null };
       setSyncAllProgress(next);
       sessionStorage.removeItem('syncProgress');
       if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
@@ -610,7 +728,7 @@ export default function SyncroPage() {
     // Do NOT auto-open terminal — only via View Terminal button.
     setCompletedSync(null);
     setSyncAllSyncing(true);
-    setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null });
+    setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null });
 
     xhr.onprogress = () => {
       buffer += xhr.responseText.slice(buffer.length);
@@ -764,6 +882,11 @@ export default function SyncroPage() {
             <p>API URL: <span className="font-mono">{u?.api || '—'}</span></p>
           </div>
         </div>
+
+        {/* Scheduler */}
+        {s?.configured && (
+          <SchedulerSection />
+        )}
 
         {/* Sync Data */}
         {s?.configured && (

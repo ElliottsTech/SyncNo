@@ -3,15 +3,19 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useSession, signOut } from 'next-auth/react';
+import { useMemo } from 'react';
+
+const ADMIN_ONLY = ['/users', '/logs', '/syncro'];
 
 const navItems = [
   { href: '/customers', label: 'Customers' },
   { href: '/tickets', label: 'Tickets' },
   { href: '/assets', label: 'Assets' },
   { href: '/invoices', label: 'Invoices' },
-  { href: '/purchase-orders', label: 'Purchase Orders' },
-  { href: '/vendors', label: 'Vendors' },
   { href: '/estimates', label: 'Estimates' },
+  { href: '/purchase-orders', label: 'Purchase Orders' },
+  { href: '/products', label: 'Products' },
+  { href: '/vendors', label: 'Vendors' },
   { href: '/search', label: 'Search' },
   { href: '/users', label: 'Users' },
   { href: '/logs', label: 'Logs' },
@@ -21,12 +25,18 @@ const navItems = [
 export default function Sidebar() {
   const pathname = usePathname();
   const { data: session, status } = useSession();
+  const role = session?.user?.role;
+
+  const items = useMemo(() => {
+    if (role === 'admin') return navItems;
+    return navItems.filter(i => !ADMIN_ONLY.includes(i.href));
+  }, [role]);
 
   return (
     <aside className="w-56 bg-gray-900 text-white h-screen p-4 flex flex-col sticky top-0 overflow-y-auto">
       <img src="/SyncNo.png" alt="SyncNo" className="w-[75%] mx-auto mb-6 object-contain" />
       <nav className="flex-1">
-        {navItems.map(item => (
+        {items.map(item => (
           <Link
             key={item.href}
             href={item.href}

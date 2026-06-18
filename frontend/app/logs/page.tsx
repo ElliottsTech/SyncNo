@@ -1,5 +1,7 @@
 'use client';
 import { useState, useEffect, Fragment } from 'react';
+import { useSession } from 'next-auth/react';
+import { useRouter } from 'next/navigation';
 import Pagination from '../../components/Pagination';
 
 const API = '/api';
@@ -46,16 +48,27 @@ export default function LogsPage() {
   const [tab, setTab] = useState<Tab>('all');
   const [expanded, setExpanded] = useState<number | null>(null);
   const [pagination, setPagination] = useState({ page: 1, limit: 100, total: 0 });
+  const [error, setError] = useState<string | null>(null);
+  const { data: session, status } = useSession();
+  const router = useRouter();
 
   useEffect(() => {
+    if (status === 'authenticated' && session?.user?.role !== 'admin') {
+      router.replace('/');
+    }
+  }, [status, session, router]);
+
+  useEffect(() => {
+    if (status !== 'authenticated' || session?.user?.role !== 'admin') return;
     const actionFilter = tab === 'sync' ? '&action=SYNC' : '';
     fetch(`${API}/logs?page=${page}&limit=100${actionFilter}`)
-      .then(r => r.json())
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(d => {
         setLogs(d.data || []);
-        setPagination(d.pagination);
-      });
-  }, [page, tab]);
+        setPagination(d.pagination || { page: 1, limit: 100, total: 0 });
+      })
+      .catch(e => setError(e.message));
+  }, [page, tab, status, session]);
 
   const actionVariant = (action: string) => {
     if (action === 'LOGIN') return 'bg-blue-100 text-blue-800';

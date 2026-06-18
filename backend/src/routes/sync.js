@@ -49,6 +49,27 @@ try {
   const db = getDb();
   db.prepare("ALTER TABLE invoices ADD COLUMN raw_json TEXT").run();
 } catch (_) {}
+// Products: add raw_json/synced/updated_at/deleted_at/since_updated_at for existing DBs
+try {
+  const db = getDb();
+  db.prepare("ALTER TABLE products ADD COLUMN since_updated_at TEXT").run();
+} catch (_) {}
+try {
+  const db = getDb();
+  db.prepare("ALTER TABLE products ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))").run();
+} catch (_) {}
+try {
+  const db = getDb();
+  db.prepare("ALTER TABLE products ADD COLUMN synced INTEGER DEFAULT 0").run();
+} catch (_) {}
+try {
+  const db = getDb();
+  db.prepare("ALTER TABLE products ADD COLUMN raw_json TEXT").run();
+} catch (_) {}
+try {
+  const db = getDb();
+  db.prepare("ALTER TABLE products ADD COLUMN deleted_at TEXT DEFAULT NULL").run();
+} catch (_) {}
 
 // In-memory abort controller for cancelling running sync
 // Per-sync abort controllers keyed by sync ID (entity name or 'all').
@@ -239,7 +260,7 @@ router.get('/status', (req, res) => {
 
 router.get('/last-results', (req, res) => {
   const db = getDb();
-  const entities = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors'];
+  const entities = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
   const results = {};
   for (const ent of entities) {
     const state = getSyncState(ent);
@@ -264,6 +285,7 @@ router.get('/progress', (req, res) => {
   const estimateState = getSyncState('estimates');
   const poState = getSyncState('purchase_orders');
   const vendorState = getSyncState('vendors');
+  const productState = getSyncState('products');
 
   res.json({
     tickets: ticketState,
@@ -274,6 +296,7 @@ router.get('/progress', (req, res) => {
     estimates: estimateState,
     purchase_orders: poState,
     vendors: vendorState,
+    products: productState,
   });
 });
 
@@ -429,7 +452,7 @@ router.post('/trigger', async (req, res) => {
   rateLimitHits = 0;
 
   // Check if this entity is already running
-  const ALL_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors'];
+  const ALL_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
   const entitiesToRun = entity && entity !== 'all'
     ? [entity]
     : ALL_ENTITIES;
@@ -609,25 +632,28 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
 
   function markDeletedTickets(seenIds) {
     if (seenIds.size === 0) return;
-    // Mark tickets that were previously synced but not seen in this catalog pass as deleted
+    // Mark tickets that were previously synced but not seen in this catalog pass as deleted.
+    // Use a temp table — batching `NOT IN` is unsafe: each batch only excludes its own
+    // slice, so two batches end up marking every row.
     const ids = Array.from(seenIds);
-    const batchSize = 500;
-    let deleted = 0;
-    for (let i = 0; i < ids.length; i += batchSize) {
-      const batch = ids.slice(i, i + batchSize);
-      const placeholders = batch.map(() => '?').join(',');
-      const result = db.prepare(`
-        UPDATE tickets
-        SET deleted_at = datetime('now')
-        WHERE id NOT IN (${placeholders})
-          AND deleted_at IS NULL
-          AND has_detail = 1
-      `).run(...batch);
-      deleted += result.changes;
-    }
-    if (deleted > 0) {
-      log('SYNC_SOFT_DELETE', `Tickets soft-deleted: ${deleted}`);
-      emitEvent({ phase: 'tickets', status: 'progress', subphase: 'catalog', message: `${deleted} tickets removed from Syncro — soft-deleted` }, res);
+    db.prepare('DROP TABLE IF EXISTS _seen_ticket_ids').run();
+    db.prepare('CREATE TEMP TABLE _seen_ticket_ids (id INTEGER PRIMARY KEY)').run();
+    const insertSeen = db.prepare('INSERT INTO _seen_ticket_ids (id) VALUES (?)');
+    const insertMany = db.transaction((rows) => {
+      for (const id of rows) insertSeen.run(id);
+    });
+    insertMany(ids);
+    const result = db.prepare(`
+      UPDATE tickets
+      SET deleted_at = datetime('now')
+      WHERE deleted_at IS NULL
+        AND has_detail = 1
+        AND NOT EXISTS (SELECT 1 FROM _seen_ticket_ids s WHERE s.id = tickets.id)
+    `).run();
+    db.prepare('DROP TABLE IF EXISTS _seen_ticket_ids').run();
+    if (result.changes > 0) {
+      log('SYNC_SOFT_DELETE', `Tickets soft-deleted: ${result.changes}`);
+      emitEvent({ phase: 'tickets', status: 'progress', subphase: 'catalog', message: `${result.changes} tickets removed from Syncro — soft-deleted` }, res);
     }
   }
 
@@ -1761,6 +1787,219 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
     }
   }
 
+  // ─── Products sync ──────────────────────────────────────────────────────────
+  // Syncro /products list returns full record shape (same as detail), so no detail
+  // phase needed. Sub-phases: categories (one page), serials (per serialized product).
+
+  async function syncProducts() {
+    emitEvent({ phase: 'products', status: 'started' }, res);
+    const localMax = forceAll ? null : (getSetting('last_sync_products') || null);
+    const state = getSyncState('products');
+
+    const resumeOffset = forceAll ? 0 : (state.detail_item_index || 0);
+
+    let absoluteIndex = 0;
+    let latestUpdatedAt = localMax;
+    let inserts = 0;
+
+    try {
+      const page1 = await fetchJson(`${baseUrl}/products?page=1&per_page=100`, 'products');
+      const totalPages = page1.meta?.total_pages || 1;
+      const total = await computeTotalRecords(page1, 'products', 'products');
+
+      state.phase = 'detail';
+      state.detail_total = total;
+      state.detail_synced = 0;
+      if (forceAll) {
+        state.detail_page = 1;
+        state.detail_item_index = 0;
+      }
+      saveSyncState(state);
+
+      // Track seen IDs for soft-delete detection
+      const seenIds = new Set();
+
+      for (let page = 1; page <= totalPages; page++) {
+        const data = page === 1 ? page1 : await fetchJson(`${baseUrl}/products?page=${page}&per_page=100`, 'products');
+        checkAbort();
+        const products = data.products || [];
+
+        for (const p of products) {
+          absoluteIndex++;
+          seenIds.add(p.id);
+          checkAbort();
+          if (absoluteIndex <= resumeOffset) continue;
+
+          const existing = db.prepare('SELECT id, since_updated_at FROM products WHERE id = ?').get(p.id);
+          // Syncro products have no `updated_at`; use since_updated_at as delta signal
+          const shouldSync =
+            forceAll ||
+            !existing ||
+            !localMax ||
+            !p.since_updated_at ||
+            p.since_updated_at > localMax;
+
+          if (shouldSync) {
+            try {
+              db.prepare(`
+                INSERT OR REPLACE INTO products (id, price_cost, price_retail, condition, description, maintain_stock, name, quantity, warranty, sort_order, reorder_at, disabled, taxable, product_category, category_path, upc_code, discount_percent, warranty_template_id, qb_item_id, desired_stock_level, price_wholesale, notes, tax_rate_id, physical_location, serialized, vendor_ids, long_description, location_quantities, photos, since_updated_at, updated_at, synced, raw_json, deleted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 1, ?, NULL)
+              `).run(
+                p.id, String(p.price_cost ?? ''), String(p.price_retail ?? ''),
+                p.condition || '', p.description || '', p.maintain_stock ? 1 : 0,
+                p.name || '', String(p.quantity ?? ''), p.warranty || '',
+                p.sort_order != null ? String(p.sort_order) : '', p.reorder_at != null ? String(p.reorder_at) : '',
+                p.disabled ? 1 : 0, p.taxable ? 1 : 0,
+                p.product_category || '', p.category_path || '', p.upc_code || '',
+                p.discount_percent != null ? String(p.discount_percent) : '', p.warranty_template_id || '',
+                p.qb_item_id || '', p.desired_stock_level != null ? String(p.desired_stock_level) : '',
+                String(p.price_wholesale ?? ''), p.notes || '', p.tax_rate_id || '',
+                p.physical_location || '', p.serialized ? 1 : 0,
+                JSON.stringify(p.vendor_ids || []), p.long_description || '',
+                JSON.stringify(p.location_quantities || []), JSON.stringify(p.photos || []),
+                p.since_updated_at || '', JSON.stringify(p)
+              );
+              if (!existing) inserts++;
+              if (p.since_updated_at && p.since_updated_at > (latestUpdatedAt || '')) latestUpdatedAt = p.since_updated_at;
+            } catch (detailErr) {
+              if (syncSignal.aborted) throw new Error('Sync cancelled');
+              results.errors = results.errors || [];
+              results.errors.push(`products/${p.id}: ${detailErr.message}`);
+            }
+          }
+
+          state.detail_page = page;
+          state.detail_item_index = absoluteIndex;
+          saveSyncState(state);
+          emitEvent({ phase: 'products', status: 'progress', current: absoluteIndex, total, currentRecordId: p.id, currentRecordName: p.name }, res);
+          await new Promise((resolve, reject) => {
+            const t = setTimeout(resolve, 350);
+            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
+          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+        }
+
+        if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
+      }
+
+      // Soft-delete products no longer in catalog.
+      // Temp table approach — batching `NOT IN` would mark every row across batches.
+      if (seenIds.size > 0 && !forceAll) {
+        const ids = Array.from(seenIds);
+        db.prepare('DROP TABLE IF EXISTS _seen_product_ids').run();
+        db.prepare('CREATE TEMP TABLE _seen_product_ids (id INTEGER PRIMARY KEY)').run();
+        const insertSeen = db.prepare('INSERT INTO _seen_product_ids (id) VALUES (?)');
+        const insertMany = db.transaction((rows) => {
+          for (const id of rows) insertSeen.run(id);
+        });
+        insertMany(ids);
+        const r = db.prepare(`
+          UPDATE products SET deleted_at = datetime('now')
+          WHERE deleted_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM _seen_product_ids s WHERE s.id = products.id)
+        `).run();
+        db.prepare('DROP TABLE IF EXISTS _seen_product_ids').run();
+        if (r.changes > 0) {
+          log('SYNC_SOFT_DELETE', `Products soft-deleted: ${r.changes}`);
+          emitEvent({ phase: 'products', status: 'progress', message: `${r.changes} products removed from Syncro — soft-deleted` }, res);
+        }
+      }
+
+      if (latestUpdatedAt) setSetting('last_sync_products', latestUpdatedAt);
+      results.products = absoluteIndex;
+      results.productsInserted = inserts;
+      state.phase = 'idle';
+      state.detail_page = 1;
+      state.detail_item_index = 0;
+      state.last_result_count = inserts;
+      state.last_result_error = null;
+      saveSyncState(state);
+      log('SYNC_ENTITY', `Products: ${absoluteIndex} iterated, ${inserts} inserted`);
+      emitEvent({ phase: 'products', status: 'done', count: inserts }, res);
+      clearEventsForEntity('products');
+
+      // Sub-phase: categories (small, single fetch)
+      await syncProductCategories();
+
+      // Sub-phase: serials (per serialized product)
+      await syncProductSerials();
+    } catch (e) {
+      state.phase = 'error';
+      state.last_result_error = e.message;
+      saveSyncState(state);
+      results.errors = results.errors || [];
+      results.errors.push(`products: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent({ phase: 'products', status: 'error', error: e.message }, res);
+    }
+  }
+
+  async function syncProductCategories() {
+    emitEvent({ phase: 'products', status: 'started', subphase: 'categories', message: 'Fetching product categories...' }, res);
+    try {
+      const data = await fetchJson(`${baseUrl}/products/categories`, 'products_categories');
+      const cats = data.categories || [];
+      const insertMany = db.transaction((rows) => {
+        for (const c of rows) {
+          db.prepare(`
+            INSERT OR REPLACE INTO product_categories (id, account_id, ancestry, name, description, device_product_id, names_depth_cache, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            c.id, String(c.account_id ?? ''), c.ancestry || '',
+            c.name || '', c.description || '', c.device_product_id || '',
+            c.names_depth_cache || '', JSON.stringify(c)
+          );
+        }
+      });
+      insertMany(cats);
+      log('SYNC_ENTITY', `Product categories: ${cats.length} upserted`);
+      emitEvent({ phase: 'products', status: 'progress', subphase: 'categories', message: `${cats.length} categories synced` }, res);
+    } catch (e) {
+      // Non-fatal — categories are reference data
+      log('SYNC_ERROR', `product_categories: ${e.message}`);
+      results.errors = results.errors || [];
+      results.errors.push(`product_categories: ${e.message}`);
+    }
+  }
+
+  async function syncProductSerials() {
+    // Only fetch serials for serialized products (large payloads otherwise)
+    const serialized = db.prepare('SELECT id, name FROM products WHERE serialized = 1 AND deleted_at IS NULL').all();
+    if (serialized.length === 0) {
+      emitEvent({ phase: 'products', status: 'progress', subphase: 'serials', message: 'No serialized products — skipping serials' }, res);
+      return;
+    }
+    emitEvent({ phase: 'products', status: 'started', subphase: 'serials', message: `Fetching serials for ${serialized.length} serialized products...` }, res);
+    let processed = 0;
+    for (const p of serialized) {
+      checkAbort();
+      try {
+        const data = await fetchJson(`${baseUrl}/products/${p.id}/product_serials`, 'products_serials');
+        const serials = data.product_serials || [];
+        for (const s of serials) {
+          db.prepare(`
+            INSERT OR REPLACE INTO product_serials (id, product_id, serial_number, account_id, created_at, updated_at, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            s.id, p.id, s.serial_number || s.serial || '',
+            String(s.account_id ?? ''), s.created_at || '', s.updated_at || '',
+            JSON.stringify(s)
+          );
+        }
+      } catch (e) {
+        if (syncSignal.aborted) throw new Error('Sync cancelled');
+        results.errors = results.errors || [];
+        results.errors.push(`product_serials/${p.id}: ${e.message}`);
+      }
+      processed++;
+      emitEvent({ phase: 'products', status: 'progress', subphase: 'serials', current: processed, total: serialized.length, message: `serials ${processed}/${serialized.length}` }, res);
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(resolve, 350);
+        syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
+      }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+    }
+    log('SYNC_ENTITY', `Product serials: iterated ${serialized.length} serialized products`);
+  }
+
   // ─── Run all entity syncs ───────────────────────────────────────────────────
 
   try {
@@ -1773,6 +2012,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
       else if (ent === 'estimates') await syncEstimates();
       else if (ent === 'purchase_orders') await syncPurchaseOrders();
       else if (ent === 'vendors') await syncVendors();
+      else if (ent === 'products') await syncProducts();
     }
 
     results.duration = Date.now() - startTime;
@@ -1813,7 +2053,7 @@ router.delete('/trigger', (req, res) => {
   // Reset DB state for affected entities only (preserves cursor for resume)
   const entities = targetEntity && targetEntity !== 'all'
     ? [targetEntity]
-    : ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors'];
+    : ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
   for (const ent of entities) {
     const state = getSyncState(ent);
     if (state.phase !== 'idle' && state.phase !== 'error') {
@@ -1833,7 +2073,7 @@ router.delete('/trigger', (req, res) => {
 
 router.post('/reset', (req, res) => {
   const { entity } = req.body;
-  const entities = entity ? [entity] : ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors'];
+  const entities = entity ? [entity] : ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
   for (const ent of entities) {
     const state = getSyncState(ent);
     state.phase = 'idle';
@@ -1848,7 +2088,7 @@ router.post('/reset', (req, res) => {
 
 router.patch('/synced', (req, res) => {
   const { table, id, synced } = req.body;
-  const allowedTables = ['customers', 'contacts', 'tickets', 'assets', 'invoices', 'estimates', 'purchase_orders', 'vendors'];
+  const allowedTables = ['customers', 'contacts', 'tickets', 'assets', 'invoices', 'estimates', 'purchase_orders', 'vendors', 'products'];
   if (!table || !id || typeof synced !== 'boolean') {
     return res.status(400).json({ error: 'table, id, and synced required' });
   }
@@ -1865,6 +2105,148 @@ router.patch('/synced', (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ─── Daily scheduler ─────────────────────────────────────────────────────────
+
+const SCHEDULABLE_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
+// Default staggered times — 15min apart starting 02:00
+const DEFAULT_SCHEDULE_TIMES = {
+  customers: '02:00',
+  contacts: '02:15',
+  tickets: '02:30',
+  invoices: '02:45',
+  assets: '03:00',
+  estimates: '03:15',
+  purchase_orders: '03:30',
+  vendors: '03:45',
+  products: '04:00',
+};
+const SCHEDULE_LAST_FIRES_TABLE = 'schedule_last_fired';
+
+// Ensure schedule tracking table exists
+try {
+  const db = getDb();
+  db.prepare(`CREATE TABLE IF NOT EXISTS ${SCHEDULE_LAST_FIRES_TABLE} (entity TEXT PRIMARY KEY, last_fired_date TEXT)`).run();
+} catch (e) { console.error('schedule table init error:', e.message); }
+
+// Seed default schedule times on first run
+try {
+  const db = getDb();
+  for (const ent of SCHEDULABLE_ENTITIES) {
+    const existing = getSetting(`schedule_${ent}`);
+    if (existing === null || existing === undefined) {
+      setSetting(`schedule_${ent}`, DEFAULT_SCHEDULE_TIMES[ent]);
+    }
+  }
+} catch (e) { console.error('schedule seed error:', e.message); }
+
+function getSchedule() {
+  const db = getDb();
+  const schedule = {};
+  const lastFiredRows = db.prepare(`SELECT entity, last_fired_date FROM ${SCHEDULE_LAST_FIRES_TABLE}`).all();
+  const lastFiredMap = Object.fromEntries(lastFiredRows.map(r => [r.entity, r.last_fired_date]));
+  for (const ent of SCHEDULABLE_ENTITIES) {
+    const raw = getSetting(`schedule_${ent}`);
+    const time = raw === null || raw === undefined || raw === '' ? '' : raw;
+    schedule[ent] = {
+      time,
+      enabled: time !== '',
+      last_fired: lastFiredMap[ent] || null,
+    };
+  }
+  return schedule;
+}
+
+function markScheduleFired(entity, date) {
+  const db = getDb();
+  db.prepare(`INSERT OR REPLACE INTO ${SCHEDULE_LAST_FIRES_TABLE} (entity, last_fired_date) VALUES (?, ?)`).run(entity, date);
+}
+
+// Run a scheduled sync — uses no-op res since no SSE client.
+async function runScheduledSync(entity) {
+  const apiKey = getSetting('syncro_api_key');
+  const subdomain = getSetting('syncro_subdomain');
+  if (!apiKey || !subdomain) {
+    console.error(`scheduled sync ${entity}: Syncro not configured`);
+    return;
+  }
+  // Skip if already running
+  const state = getSyncState(entity);
+  if (state.phase !== 'idle' && state.phase !== 'error') {
+    console.log(`scheduled sync ${entity}: already running (phase=${state.phase}), skipping`);
+    return;
+  }
+  const syncId = entity;
+  syncAbort.delete(syncId);
+  const noopRes = {
+    write: () => {}, writeHead: () => {}, end: () => {},
+  };
+  try {
+    const db = getDb();
+    db.prepare(`INSERT INTO logs (action, details, ip_address) VALUES (?, ?, ?)`).run('SCHEDULED_SYNC_START', `entity=${entity}`, null);
+  } catch (_) {}
+  try {
+    await runSync([entity], false, apiKey, subdomain, noopRes, syncId);
+  } catch (e) {
+    console.error(`scheduled sync ${entity} failed:`, e.message);
+  }
+}
+
+// Check every minute. Fire if current HH:MM matches scheduled time AND not already fired today.
+const SCHEDULE_CHECK_INTERVAL_MS = 60 * 1000;
+let scheduleTimer = null;
+function checkSchedule() {
+  try {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const hhmm = `${hh}:${mm}`;
+    const today = now.toISOString().slice(0, 10);
+    const schedule = getSchedule();
+    for (const ent of SCHEDULABLE_ENTITIES) {
+      const cfg = schedule[ent];
+      if (!cfg.enabled) continue;
+      if (cfg.time !== hhmm) continue;
+      if (cfg.last_fired === today) continue;
+      markScheduleFired(ent, today);
+      // Fire async, don't block check loop
+      runScheduledSync(ent);
+    }
+  } catch (e) {
+    console.error('schedule check error:', e.message);
+  }
+}
+scheduleTimer = setInterval(checkSchedule, SCHEDULE_CHECK_INTERVAL_MS);
+// Initial check shortly after startup so a missed-time-while-down window is small
+setTimeout(checkSchedule, 5000);
+
+// ─── API: Schedule GET/POST ──────────────────────────────────────────────────
+
+router.get('/schedule', (req, res) => {
+  res.json({ schedule: getSchedule() });
+});
+
+router.post('/schedule', (req, res) => {
+  const { schedule } = req.body || {};
+  if (!schedule || typeof schedule !== 'object') {
+    return res.status(400).json({ error: 'schedule object required' });
+  }
+  const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+  for (const ent of Object.keys(schedule)) {
+    if (!SCHEDULABLE_ENTITIES.includes(ent)) continue;
+    const val = schedule[ent];
+    // Accept either { time: 'HH:MM' } or 'HH:MM' directly
+    const time = typeof val === 'string' ? val : (val && val.time);
+    if (time === '' ) {
+      setSetting(`schedule_${ent}`, '');
+    } else if (time && timeRegex.test(time)) {
+      setSetting(`schedule_${ent}`, time);
+    } else {
+      return res.status(400).json({ error: `invalid time for ${ent}: ${time}` });
+    }
+  }
+  res.json({ ok: true, schedule: getSchedule() });
 });
 
 export default router;

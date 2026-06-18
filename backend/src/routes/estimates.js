@@ -3,6 +3,24 @@ import { getDb } from '../db/database.js';
 
 const router = Router();
 
+// Enrich line_items parsed from raw_json with product names from products table.
+function enrichLineItems(lineItems) {
+  if (!Array.isArray(lineItems) || lineItems.length === 0) return lineItems;
+  const db = getDb();
+  const ids = lineItems.map(li => li.product_id).filter(id => id != null && id !== '');
+  if (ids.length === 0) return lineItems;
+  const uniqIds = [...new Set(ids.map(String))];
+  const placeholders = uniqIds.map(() => '?').join(',');
+  const rows = db.prepare(`SELECT id, name FROM products WHERE id IN (${placeholders})`).all(...uniqIds);
+  const map = new Map(rows.map(r => [String(r.id), r.name]));
+  for (const li of lineItems) {
+    if (li.product_id != null && li.product_id !== '') {
+      li.product_name = map.get(String(li.product_id)) || li.product_name || null;
+    }
+  }
+  return lineItems;
+}
+
 // GET /api/estimates - all estimates
 router.get('/', (req, res) => {
   const db = getDb();
@@ -42,6 +60,18 @@ router.get('/:id', (req, res) => {
   const db = getDb();
   const est = db.prepare('SELECT *, raw_json, synced FROM estimates WHERE id = ?').get(req.params.id);
   if (!est) return res.status(404).json({ error: 'Not found' });
+
+  // Parse + enrich line_items with product names from products table
+  est.line_items = [];
+  if (est.raw_json) {
+    try {
+      const raw = typeof est.raw_json === 'string' ? JSON.parse(est.raw_json) : est.raw_json;
+      if (Array.isArray(raw.line_items)) {
+        est.line_items = enrichLineItems(raw.line_items);
+      }
+    } catch (_) {}
+  }
+
   res.json(est);
 });
 

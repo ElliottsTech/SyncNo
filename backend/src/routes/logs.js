@@ -31,8 +31,9 @@ function parseDeviceType(ua) {
   return 'Desktop';
 }
 
-// GET /api/logs - list logs
+// GET /api/logs - list logs (admin only)
 router.get('/', (req, res) => {
+  if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const db = getDb();
   const { page = 1, limit = 100, user_id, action } = req.query;
   const offset = (page - 1) * limit;

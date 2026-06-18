@@ -76,6 +76,12 @@ router.get('/:id', (req, res) => {
     } catch (e) {}
   }
 
+  if (ticket.user && typeof ticket.user === 'string') {
+    try {
+      ticket.user = JSON.parse(ticket.user);
+    } catch (e) {}
+  }
+
   res.json(ticket);
 });
 

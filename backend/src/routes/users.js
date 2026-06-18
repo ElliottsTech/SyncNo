@@ -3,22 +3,54 @@ import { getDb } from '../db/database.js';
 
 const router = Router();
 
-// POST /api/users/upsert - create or update user
+function isAdmin(req) {
+  return req.user?.role === 'admin';
+}
+
+function requireAdmin(req, res, next) {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Admin only' });
+  next();
+}
+
+// POST /api/users/upsert - create or update user (called by auth flow).
+// Role is never overwritten on update so admin changes persist across logins.
+// First user ever to log in is auto-promoted to admin.
 router.post('/upsert', (req, res) => {
   const db = getDb();
   const { id, email, name } = req.body;
   if (!id || !email) return res.status(400).json({ error: 'id and email required' });
 
-  db.prepare(`
-    INSERT INTO users (id, email, name) VALUES (?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET email = excluded.email, name = excluded.name
-  `).run(id, email, name);
+  const assign = db.transaction(() => {
+    const existing = db.prepare('SELECT id FROM users WHERE id = ?').get(id);
+    if (existing) {
+      db.prepare(`
+        UPDATE users SET email = ?, name = ?, last_login = datetime('now') WHERE id = ?
+      `).run(email, name, id);
+      return;
+    }
+    const userCount = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
+    const role = userCount === 0 ? 'admin' : 'user';
+    db.prepare(`
+      INSERT INTO users (id, email, name, last_login, role)
+      VALUES (?, ?, ?, datetime('now'), ?)
+    `).run(id, email, name, role);
+  });
+  assign();
 
   res.json({ ok: true });
 });
 
+// GET /api/users/:id/role - role lookup for JWT callback.
+// Must stay public so the auth flow can read role during sign-in.
+router.get('/:id/role', (req, res) => {
+  const db = getDb();
+  const row = db.prepare('SELECT role FROM users WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json({ role: row.role });
+});
+
 // GET /api/users - list users (admin only)
-router.get('/', (req, res) => {
+router.get('/', requireAdmin, (req, res) => {
   const db = getDb();
   const users = db.prepare(`
     SELECT id, email, name, last_login, created_at, role
@@ -28,15 +60,27 @@ router.get('/', (req, res) => {
   res.json(users);
 });
 
-// GET /api/users/:id - user detail
-router.get('/:id', (req, res) => {
+// GET /api/users/:id - user detail (admin only)
+router.get('/:id', requireAdmin, (req, res) => {
   const db = getDb();
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'Not found' });
   res.json(user);
 });
 
-// PUT /api/users/:id/last-login - update last login
+// PUT /api/users/:id/role - update role (admin only)
+router.put('/:id/role', requireAdmin, (req, res) => {
+  const db = getDb();
+  const { role } = req.body;
+  if (!['admin', 'user'].includes(role)) {
+    return res.status(400).json({ error: 'role must be admin or user' });
+  }
+  const result = db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
+});
+
+// PUT /api/users/:id/last-login - update last login (called by auth flow)
 router.put('/:id/last-login', (req, res) => {
   const db = getDb();
   db.prepare(`UPDATE users SET last_login = datetime('now') WHERE id = ?`).run(req.params.id);

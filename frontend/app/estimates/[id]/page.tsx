@@ -21,7 +21,10 @@ export default function EstimateDetail() {
   if (!estimate) return <p className="text-gray-500">Loading...</p>;
 
   const raw = estimate.raw_json ? (typeof estimate.raw_json === 'string' ? JSON.parse(estimate.raw_json) : estimate.raw_json) : null;
-  const lineItems = raw?.line_items || [];
+  // Prefer enriched line_items from backend (product_name resolved), fall back to raw
+  const lineItems = Array.isArray(estimate.line_items) && estimate.line_items.length > 0
+    ? estimate.line_items
+    : (raw?.line_items || []);
   const customer = raw?.customer;
   const hasBusiness = customer?.business_name && customer?.business_name !== customer?.fullname;
   const displayName = hasBusiness
@@ -97,7 +100,15 @@ export default function EstimateDetail() {
               <tbody className="divide-y">
                 {lineItems.map((li: any, i: number) => (
                   <tr key={i}>
-                    <td className="px-4 py-3">{li.product_name || li.name || 'N/A'}</td>
+                    <td className="px-4 py-3">
+                      {li.product_id ? (
+                        <Link href={`/products/${li.product_id}`} className="text-blue-600 hover:underline font-medium">
+                          {li.product_name || li.name || li.product_id}
+                        </Link>
+                      ) : (
+                        <span>{li.product_name || li.name || 'N/A'}</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3">{li.description || li.name || '—'}</td>
                     <td className="px-4 py-3">{li.quantity || 1}</td>
                     <td className="px-4 py-3">${parseFloat(li.price || li.unit_price || 0).toFixed(2)}</td>
