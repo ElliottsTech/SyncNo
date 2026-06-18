@@ -55,28 +55,6 @@ export default function CustomersPage() {
 
   const columns = [
     {
-      key: 'synced',
-      label: 'Synced',
-      render: (v, row) => (
-        <input
-          type="checkbox"
-          checked={!!v}
-          onChange={async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            await fetch(`${API}/sync/synced`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ table: 'customers', id: row.id, synced: !v }),
-            });
-            fetchCustomers();
-          }}
-          className="w-4 h-4 cursor-pointer"
-          title={v ? 'Mark for re-sync on next sync' : 'Synced — click to mark for re-sync'}
-        />
-      ),
-    },
-    {
       key: 'display_name',
       label: 'Business',
       render: (v, row) => (
