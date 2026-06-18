@@ -576,6 +576,8 @@ export default function SyncroPage() {
         message = `catalog page ${data.current}/${data.total}`;
       } else if (phase === 'tickets' && data.subphase === 'detail') {
         message = `detail ${data.current}/${data.total}`;
+      } else if (data.subphase) {
+        message = `${data.subphase} ${data.current}/${data.total}`;
       } else {
         message = data.total != null ? `${data.current}/${data.total}` : `${data.current}`;
       }
