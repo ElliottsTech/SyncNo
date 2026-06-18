@@ -12,6 +12,7 @@ export default function InvoiceDetail() {
   const { id } = useParams();
   const [invoice, setInvoice] = useState<any>(null);
   const [payments, setPayments] = useState<any[]>([]);
+  const [linkedTicket, setLinkedTicket] = useState<{ ticket_id: string | null; ticket: any | null } | null>(null);
 
   useEffect(() => {
     fetch(`${API}/invoices/${id}`)
@@ -20,6 +21,9 @@ export default function InvoiceDetail() {
     fetch(`${API}/invoices/${id}/payments`)
       .then(r => r.json())
       .then(setPayments);
+    fetch(`${API}/invoices/${id}/ticket`)
+      .then(r => r.json())
+      .then(setLinkedTicket);
   }, [id]);
 
   if (!invoice) return <p className="text-gray-500">Loading...</p>;
@@ -94,6 +98,30 @@ export default function InvoiceDetail() {
             </div>
           ) : null}
         </div>
+
+        {linkedTicket && linkedTicket.ticket_id && (
+          <div className="p-6 border-t">
+            <h3 className="font-semibold mb-2">Linked Ticket</h3>
+            {linkedTicket.ticket ? (
+              <Link
+                href={`/tickets/${linkedTicket.ticket.id}`}
+                className="inline-flex items-center gap-2 text-sm px-3 py-2 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100"
+              >
+                <span className="font-mono">#{linkedTicket.ticket.number}</span>
+                <span className="text-gray-700">{linkedTicket.ticket.subject || '(no subject)'}</span>
+                {linkedTicket.ticket.status && (
+                  <span className="text-xs text-gray-500">· {linkedTicket.ticket.status}</span>
+                )}
+                <span className="text-blue-600">→</span>
+              </Link>
+            ) : (
+              <p className="text-sm text-gray-500">
+                Ticket ID <span className="font-mono">{linkedTicket.ticket_id}</span> not yet synced.
+                <Link href="/syncro" className="text-blue-600 hover:underline ml-2">Sync tickets →</Link>
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {payments.length > 0 && (

@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS tickets (
   raw_json TEXT,
   synced INTEGER DEFAULT 0,
   has_detail INTEGER DEFAULT 0,
-  synced_at TEXT
+  synced_at TEXT,
+  deleted_at TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS assets (
@@ -160,6 +161,7 @@ CREATE TABLE IF NOT EXISTS estimates (
   location_id TEXT,
   invoice_id TEXT,
   employee TEXT,
+  raw_json TEXT,
   synced INTEGER DEFAULT 0
 );
 
@@ -192,6 +194,7 @@ CREATE TABLE IF NOT EXISTS vendors (
   zip TEXT,
   website TEXT,
   notes TEXT,
+  raw_json TEXT,
   synced INTEGER DEFAULT 0
 );
 
@@ -340,10 +343,16 @@ CREATE TABLE IF NOT EXISTS sync_state (
   total_pages INTEGER DEFAULT 0,
   last_page_synced INTEGER DEFAULT 0,
   detail_cursor TEXT DEFAULT NULL,
+  detail_page INTEGER DEFAULT 1,
+  detail_item_index INTEGER DEFAULT 0,
   detail_total INTEGER DEFAULT 0,
   detail_synced INTEGER DEFAULT 0,
   last_sync TEXT,
-  updated_at TEXT DEFAULT (datetime('now'))
+  updated_at TEXT DEFAULT (datetime('now')),
+  catalog_page1_ids TEXT DEFAULT '[]',
+  catalog_total_pages INTEGER DEFAULT 0,
+  last_result_count INTEGER DEFAULT 0,
+  last_result_error TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sync_events (
@@ -361,6 +370,9 @@ CREATE TABLE IF NOT EXISTS sync_events (
   current_ticket_id TEXT,
   current_ticket_number TEXT,
   count INTEGER,
+  current_record_id TEXT,
+  current_record_name TEXT,
+  data_json TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 

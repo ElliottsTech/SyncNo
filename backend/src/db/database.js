@@ -37,6 +37,15 @@ export function initDb() {
     try { db.exec(alt); } catch (e) { /* column may already exist */ }
   }
 
+  // Migrate sync_events table: add missing columns if they don't exist
+  const alterSyncEvents = [
+    'ALTER TABLE sync_events ADD COLUMN current_record_id TEXT',
+    'ALTER TABLE sync_events ADD COLUMN current_record_name TEXT',
+  ];
+  for (const alt of alterSyncEvents) {
+    try { db.exec(alt); } catch (e) { /* column may already exist */ }
+  }
+
   return db;
 }
 

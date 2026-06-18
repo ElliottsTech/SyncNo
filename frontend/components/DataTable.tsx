@@ -166,7 +166,7 @@ export default function DataTable({
           ) : (
             result.map((row, i) => (
               <tr
-                key={row.id || i}
+                key={serverSide ? i : (row.id || i)}
                 className={onRowClick ? 'hover:bg-gray-50 cursor-pointer' : ''}
                 onClick={() => onRowClick && onRowClick(row)}
               >

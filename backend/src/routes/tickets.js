@@ -110,4 +110,17 @@ router.get('/:id/line_items', (req, res) => {
   res.json(lineItems);
 });
 
+// GET /api/tickets/:id/invoices - all invoices linked to this ticket
+router.get('/:id/invoices', (req, res) => {
+  const db = getDb();
+  const invoices = db.prepare(`
+    SELECT id, number, customer_business_then_name, date, due_date, total,
+           is_paid, verified_paid, tech_marked_paid, synced
+    FROM invoices
+    WHERE ticket_id = ?
+    ORDER BY date DESC
+  `).all(req.params.id);
+  res.json(invoices);
+});
+
 export default router;

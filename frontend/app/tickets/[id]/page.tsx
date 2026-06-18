@@ -34,6 +34,7 @@ export default function TicketDetail() {
   const [comments, setComments] = useState<any[]>([]);
   const [timeEntries, setTimeEntries] = useState<any[]>([]);
   const [lineItems, setLineItems] = useState<any[]>([]);
+  const [invoices, setInvoices] = useState<any[]>([]);
 
   useEffect(() => {
     fetch(`${API}/tickets/${id}`)
@@ -51,6 +52,10 @@ export default function TicketDetail() {
     fetch(`${API}/tickets/${id}/line_items`)
       .then(r => r.json())
       .then(setLineItems);
+
+    fetch(`${API}/tickets/${id}/invoices`)
+      .then(r => r.json())
+      .then(setInvoices);
   }, [id]);
 
   if (!ticket) return <p className="text-gray-500">Loading...</p>;
@@ -97,6 +102,38 @@ export default function TicketDetail() {
             {ticket.resolved_at && <span>Resolved: {new Date(ticket.resolved_at).toLocaleString()}</span>}
           </div>
         </div>
+
+        <CollapsibleSection title="Invoices" count={invoices.length}>
+          {invoices.length > 0 ? (
+            <div className="space-y-2">
+              {invoices.map((inv: any) => (
+                <Link
+                  key={inv.id}
+                  href={`/invoices/${inv.id}`}
+                  className="flex items-center justify-between gap-2 text-sm px-3 py-2 rounded border border-gray-200 hover:bg-gray-50"
+                >
+                  <span className="flex items-center gap-3">
+                    <span className="font-mono">#{inv.number}</span>
+                    <span className="text-gray-500">{inv.customer_business_then_name || ''}</span>
+                  </span>
+                  <span className="flex items-center gap-3">
+                    {inv.date && <span className="text-gray-500">{new Date(inv.date).toLocaleDateString()}</span>}
+                    <span className="font-medium">{inv.total ? `$${inv.total}` : ''}</span>
+                    {inv.is_paid ? (
+                      <span className="text-xs text-green-700 bg-green-100 px-2 py-0.5 rounded">PAID</span>
+                    ) : inv.verified_paid ? (
+                      <span className="text-xs text-blue-700 bg-blue-100 px-2 py-0.5 rounded">VERIFIED</span>
+                    ) : (
+                      <span className="text-xs text-orange-700 bg-orange-100 px-2 py-0.5 rounded">UNPAID</span>
+                    )}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          ) : (
+            <p className="text-gray-500 text-sm">No invoices linked to this ticket</p>
+          )}
+        </CollapsibleSection>
 
         <CollapsibleSection title="Time Entries" count={timeEntries.length}>
           {timeEntries.length > 0 ? (

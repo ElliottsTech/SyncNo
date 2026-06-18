@@ -23,7 +23,7 @@ export default function Sidebar() {
   const { data: session, status } = useSession();
 
   return (
-    <aside className="w-56 bg-gray-900 text-white min-h-screen p-4 flex flex-col">
+    <aside className="w-56 bg-gray-900 text-white h-screen p-4 flex flex-col sticky top-0 overflow-y-auto">
       <img src="/SyncNo.png" alt="SyncNo" className="w-[75%] mx-auto mb-6 object-contain" />
       <nav className="flex-1">
         {navItems.map(item => (

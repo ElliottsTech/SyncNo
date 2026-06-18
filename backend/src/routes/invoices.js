@@ -100,4 +100,18 @@ router.get('/:id/payments', (req, res) => {
   res.json(payments);
 });
 
+// GET /api/invoices/:id/ticket - linked ticket (if any)
+// Returns { ticket_id, ticket } where ticket is null if not yet synced.
+router.get('/:id/ticket', (req, res) => {
+  const db = getDb();
+  const invoice = db.prepare('SELECT ticket_id FROM invoices WHERE id = ?').get(req.params.id);
+  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+  const ticketId = invoice.ticket_id || null;
+  let ticket = null;
+  if (ticketId) {
+    ticket = db.prepare('SELECT id, number, subject, status, priority, customer_business_then_name FROM tickets WHERE id = ?').get(ticketId);
+  }
+  res.json({ ticket_id: ticketId, ticket });
+});
+
 export default router;

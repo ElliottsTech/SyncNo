@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 
 export type HttpLogEntry = {
   type: 'http_log';
@@ -29,6 +29,9 @@ type LogLine = {
   message?: string;
   error?: string;
   count?: number;
+  currentTicketNumber?: string;
+  currentRecordId?: string;
+  currentRecordName?: string;
 };
 
 function statusColor(status: number): string {
@@ -72,11 +75,34 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
   const API = apiUrl;
   const [lines, setLines] = useState<LogLine[]>([]);
   const [isPaused, setIsPaused] = useState(false);
+  const [showHttpLog, setShowHttpLog] = useState(false);
   const [pollCount, setPollCount] = useState(0);
   const [debugInfo, setDebugInfo] = useState<string[]>([]);
+  const [checkpointOverride, setCheckpointOverride] = useState<{phase: string; current: number; total: number} | null>(null);
+
+  // Compute display lines with checkpoint override applied to the last matching progress line
+  const displayLines = useMemo(() => {
+    const filtered = showHttpLog
+      ? lines
+      : lines.filter(l => l.phase !== 'http_log' && l.method === undefined);
+    if (!checkpointOverride) return filtered;
+    let lastIdx = -1;
+    for (let i = filtered.length - 1; i >= 0; i--) {
+      if (filtered[i].phase === checkpointOverride.phase && filtered[i].current != null) {
+        lastIdx = i;
+        break;
+      }
+    }
+    if (lastIdx < 0) return filtered;
+    return filtered.map((l, i) => i === lastIdx
+      ? { ...l, current: checkpointOverride.current, total: checkpointOverride.total }
+      : l
+    );
+  }, [lines, checkpointOverride, showHttpLog]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const idRef = useRef(0);
+  const seenLineIds = useRef<Set<number>>(new Set());
   const seenUrls = useRef<Set<string>>(new Set());
   const lastEventIdRef = useRef<number>(0);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -89,6 +115,7 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
   }
 
   // Restore lines from storedEvents on mount (handles both old SSE string format and new DB object format)
+  // Also fetch fresh checkpoint from backend to get accurate resume position
   useEffect(() => {
     debug(`restore: storedEvents.length=${storedEvents.length}`);
     if (storedEvents.length > 0) {
@@ -112,6 +139,29 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
       }
       debug(`restore: processed ${processed}, lastId=${lastEventIdRef.current}`);
     }
+    // Fetch fresh checkpoint from backend to get accurate resume position
+    fetch(`${API}/sync/progress`)
+      .then(r => r.ok ? r.json() : null)
+      .then(progressData => {
+        if (!progressData) return;
+        // Find the entity phase from stored events or default to 'customers'
+        let entityPhase = 'customers';
+        for (const event of storedEvents) {
+          try {
+            const data = typeof event === 'string' ? JSON.parse(event.replace(/^data: /, '')) : (Array.isArray(event) ? event[0] : event);
+            if (data?.phase && data.phase !== 'done' && data.phase !== 'error' && data.phase !== 'http_log') {
+              entityPhase = data.phase;
+              break;
+            }
+          } catch (_) {}
+        }
+        const state = progressData[entityPhase];
+        if (state && state.phase === 'detail' && (state.detail_item_index || 0) > 0) {
+          debug(`backend checkpoint: ${entityPhase} detail_item_index=${state.detail_item_index}, total=${state.detail_total}`);
+          setCheckpointOverride({ phase: entityPhase, current: state.detail_item_index || 0, total: state.detail_total || 0 });
+        }
+      })
+      .catch(e => debug(`progress fetch err: ${e.message}`));
   }, []);
 
   // Poll GET /sync/events for live updates
@@ -158,6 +208,9 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
 
   const addEventLine = (data: any) => {
     idRef.current++;
+    const lineId = idRef.current;
+    if (seenLineIds.current.has(lineId)) return;
+    seenLineIds.current.add(lineId);
     const tsRaw = data.created_at ? data.created_at.split('T')[1] : null;
     const ts = tsRaw ? tsRaw.slice(0, 12) : new Date().toISOString().split('T')[1].slice(0, 12);
 
@@ -167,7 +220,7 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
       seenUrls.current.add(urlKey);
       setLines(prev => {
         const next = [...prev, {
-          id: idRef.current,
+          id: lineId,
           ts,
           method: data.method,
           url: data.url,
@@ -193,7 +246,7 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
       };
       setLines(prev => {
         const next = [...prev, {
-          id: idRef.current,
+          id: lineId,
           ts,
           phase,
           color: phaseColor[phase] || 'text-gray-400',
@@ -203,6 +256,9 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
           message: data.message,
           error: data.error,
           count: data.count,
+          currentTicketNumber: data.currentTicketNumber,
+          currentRecordId: data.currentRecordId,
+          currentRecordName: data.currentRecordName,
         }];
         return next.length > 2000 ? next.slice(-1500) : next;
       });
@@ -241,6 +297,13 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
           <div className="flex items-center gap-3">
             <span className="text-gray-500 text-xs" title="Poll count (resets on mount)">{lines.length} lines · poll #{pollCount}</span>
             <button
+              onClick={() => setShowHttpLog(v => !v)}
+              className={`text-xs px-2 py-1 rounded border ${showHttpLog ? 'border-cyan-700 text-cyan-300 bg-cyan-950' : 'border-[#30363d] text-gray-400 hover:text-white hover:border-gray-500'}`}
+              title="Toggle HTTP request log lines"
+            >
+              {showHttpLog ? 'HTTP ✓' : 'HTTP'}
+            </button>
+            <button
               onClick={() => setIsPaused(p => !p)}
               className="text-xs px-2 py-1 rounded border border-[#30363d] text-gray-400 hover:text-white hover:border-gray-500"
             >
@@ -277,7 +340,12 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
           {lines.length === 0 && storedEvents.length > 0 && (
             <div className="text-gray-500">Restoring events...</div>
           )}
-          {lines.map(line => (
+          {checkpointOverride && (
+            <div className="text-yellow-400 text-xs mb-2 border border-yellow-900 rounded p-1">
+              ⚠ Backend checkpoint: {checkpointOverride.phase} @ {checkpointOverride.current}/{checkpointOverride.total}
+            </div>
+          )}
+          {displayLines.map(line => (
             <div key={line.id} className="flex flex-col gap-0.5 mb-2 group">
               {/* Line header: timestamp method status phase duration */}
               <div className="flex items-center gap-3">
@@ -307,7 +375,20 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
                   </span>
                 ) : (
                   <span className="text-gray-400 text-xs shrink-0 truncate">
-                    {line.message || (line.current != null ? `${line.current}/${line.total}` : line.count != null ? `count: ${line.count}` : line.error || '')}
+                    {line.currentTicketNumber ? (
+                      <span>
+                        <span className="text-orange-400">#{line.currentTicketNumber}</span>
+                        {line.message ? ` ${line.message}` : ''}
+                      </span>
+                    ) : line.currentRecordName ? (
+                      <span>
+                        <span className="text-orange-400">{line.currentRecordName}</span>
+                        {line.currentRecordId ? <span className="text-gray-600"> ({line.currentRecordId})</span> : null}
+                        {line.current != null && line.total != null ? ` ${line.current}/${line.total}` : line.current != null ? ` ${line.current}` : ''}
+                      </span>
+                    ) : (
+                      line.message || (line.current != null && line.total != null ? `${line.current}/${line.total}` : line.current != null ? `${line.current}` : line.count != null ? `count: ${line.count}` : line.error || '')
+                    )}
                   </span>
                 )}
                 {line.url && (
