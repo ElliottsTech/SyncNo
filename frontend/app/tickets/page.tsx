@@ -56,28 +56,6 @@ export default function TicketsPage() {
 
   const columns = [
     {
-      key: 'synced',
-      label: 'Synced',
-      render: (v, row) => (
-        <input
-          type="checkbox"
-          checked={!!v}
-          onChange={async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            await fetch(`${API}/sync/synced`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ table: 'tickets', id: row.id, synced: !v }),
-            });
-            fetchTickets();
-          }}
-          className="w-4 h-4 cursor-pointer"
-          title={v ? 'Synced — click to force re-sync' : 'Not synced'}
-        />
-      ),
-    },
-    {
       key: 'number',
       label: '#',
       render: (v, row) => (

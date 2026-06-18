@@ -30,27 +30,6 @@ export default function EstimatesPage() {
 
   const columns = [
     {
-      key: 'synced',
-      label: 'Synced',
-      render: (v, row) => (
-        <input
-          type="checkbox"
-          checked={!!v}
-          onChange={async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            await fetch(`${API}/sync/synced`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ table: 'estimates', id: row.id, synced: !v }),
-            });
-            fetchEstimates();
-          }}
-          className="w-4 h-4 cursor-pointer"
-        />
-      ),
-    },
-    {
       key: 'number', label: '#',
       render: (v, r) => <Link href={`/estimates/${r.id}`} className="text-blue-600 hover:underline">{v}</Link>,
     },

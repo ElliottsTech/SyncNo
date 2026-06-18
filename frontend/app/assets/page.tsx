@@ -39,27 +39,6 @@ export default function AssetsPage() {
           <DataTable
             columns={[
               {
-                key: 'synced',
-                label: 'Synced',
-                render: (v, row) => (
-                  <input
-                    type="checkbox"
-                    checked={!!v}
-                    onChange={async (e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      await fetch(`${API}/sync/synced`, {
-                        method: 'PATCH',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ table: 'assets', id: row.id, synced: !v }),
-                      });
-                      fetchPage(page);
-                    }}
-                    className="w-4 h-4 cursor-pointer"
-                  />
-                ),
-              },
-              {
                 key: 'name', label: 'Name', sortable: true,
                 render: (v, r) => <Link href={`/assets/${r.id}`} className="text-blue-600 hover:underline">{v}</Link>,
               },

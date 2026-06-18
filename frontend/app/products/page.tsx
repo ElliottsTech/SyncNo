@@ -55,28 +55,6 @@ export default function ProductsPage() {
 
   const columns = [
     {
-      key: 'synced',
-      label: 'Synced',
-      sortable: false,
-      render: (v: any, row: any) => (
-        <input
-          type="checkbox"
-          checked={!!v}
-          onChange={async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            await fetch(`${API}/sync/synced`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ table: 'products', id: row.id, synced: !v }),
-            });
-            fetchProducts();
-          }}
-          className="w-4 h-4 cursor-pointer"
-        />
-      ),
-    },
-    {
       key: 'name',
       label: 'Name',
       render: (v: any, row: any) => (

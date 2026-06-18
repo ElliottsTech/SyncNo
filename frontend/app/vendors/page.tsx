@@ -20,27 +20,6 @@ export default function VendorsPage() {
 
   const columns = [
     {
-      key: 'synced',
-      label: 'Synced',
-      render: (v, row) => (
-        <input
-          type="checkbox"
-          checked={!!v}
-          onChange={async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            await fetch(`${API}/sync/synced`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ table: 'vendors', id: row.id, synced: !v }),
-            });
-            fetchVendors();
-          }}
-          className="w-4 h-4 cursor-pointer"
-        />
-      ),
-    },
-    {
       key: 'name',
       label: 'Name',
       render: (v, row) => (

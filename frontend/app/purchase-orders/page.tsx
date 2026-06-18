@@ -49,27 +49,6 @@ export default function PurchaseOrdersPage() {
 
   const columns = [
     {
-      key: 'synced',
-      label: 'Synced',
-      render: (v, row) => (
-        <input
-          type="checkbox"
-          checked={!!v}
-          onChange={async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            await fetch(`${API}/sync/synced`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ table: 'purchase_orders', id: row.id, synced: !v }),
-            });
-            fetchPOs();
-          }}
-          className="w-4 h-4 cursor-pointer"
-        />
-      ),
-    },
-    {
       key: 'number',
       label: 'PO #',
       render: (v, row) => (
