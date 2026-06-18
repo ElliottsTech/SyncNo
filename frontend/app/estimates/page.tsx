@@ -46,7 +46,7 @@ export default function EstimatesPage() {
         <p className="text-gray-500">Loading...</p>
       ) : (
         <>
-          <DataTable columns={columns} data={estimates} emptyMessage="No estimates" />
+          <DataTable columns={columns} data={estimates} emptyMessage="No estimates" rowClassName={(row: any) => !row.synced ? 'bg-red-50' : ''} />
           <Pagination
             page={pagination.page}
             limit={pagination.limit}

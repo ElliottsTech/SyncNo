@@ -98,6 +98,7 @@ export default function ProductsPage() {
         onFilterChange={handleFilterChange}
         loading={loading}
         emptyMessage="No products. Sync products from Settings."
+        rowClassName={(row: any) => !row.synced ? 'bg-red-50' : ''}
       />
       <Pagination
         page={pagination.page}

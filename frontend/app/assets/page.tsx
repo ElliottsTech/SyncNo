@@ -49,6 +49,7 @@ export default function AssetsPage() {
             data={data}
             loading={loading}
             emptyMessage="No assets"
+            rowClassName={(row: any) => !row.synced ? 'bg-red-50' : ''}
           />
           <Pagination
             page={pagination.page}

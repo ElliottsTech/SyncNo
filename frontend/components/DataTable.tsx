@@ -22,6 +22,7 @@ interface DataTableProps {
   onSortChange?: (col: string, dir: 'asc' | 'desc' | null) => void;
   onFilterChange?: (filters: Record<string, string>) => void;
   loading?: boolean;
+  rowClassName?: string | ((row: any) => string);
 }
 
 type SortDir = 'asc' | 'desc' | null;
@@ -38,6 +39,7 @@ export default function DataTable({
   onSortChange,
   onFilterChange,
   loading,
+  rowClassName,
 }: DataTableProps) {
   const [filters, setFilters] = useState<Record<string, string>>(initialFilters || {});
   const [showFilter, setShowFilter] = useState<Record<string, boolean>>({});
@@ -164,10 +166,12 @@ export default function DataTable({
               </td>
             </tr>
           ) : (
-            result.map((row, i) => (
+            result.map((row, i) => {
+              const extra = typeof rowClassName === 'function' ? rowClassName(row) : (rowClassName || '');
+              return (
               <tr
                 key={serverSide ? i : (row.id || i)}
-                className={onRowClick ? 'hover:bg-gray-50 cursor-pointer' : ''}
+                className={[onRowClick ? 'hover:bg-gray-50 cursor-pointer' : '', extra].filter(Boolean).join(' ') || undefined}
                 onClick={() => onRowClick && onRowClick(row)}
               >
                 {columns.map(col => (
@@ -176,7 +180,8 @@ export default function DataTable({
                   </td>
                 ))}
               </tr>
-            ))
+              );
+            })
           )}
         </tbody>
       </table>

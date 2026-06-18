@@ -37,7 +37,7 @@ export default function VendorsPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-6">Vendors</h1>
-      <DataTable columns={columns} data={vendors} emptyMessage="No vendors" />
+      <DataTable columns={columns} data={vendors} emptyMessage="No vendors" rowClassName={(row: any) => !row.synced ? 'bg-red-50' : ''} />
     </div>
   );
 }

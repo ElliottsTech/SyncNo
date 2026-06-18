@@ -76,6 +76,7 @@ export default function PurchaseOrdersPage() {
         onSortChange={handleSortChange}
         onFilterChange={handleFilterChange}
         loading={loading}
+        rowClassName={(row: any) => !row.synced ? 'bg-red-50' : ''}
       />
       <Pagination
         page={pagination.page}
