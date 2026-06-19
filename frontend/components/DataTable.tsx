@@ -103,9 +103,7 @@ export default function DataTable({
     if (filterTimerRef.current) clearTimeout(filterTimerRef.current);
   }, []);
 
-  if (!data || data.length === 0) {
-    return <p className="text-gray-500 py-8 text-center">{emptyMessage}</p>;
-  }
+  const showEmpty = !loading && (!data || data.length === 0);
 
   return (
     <div className="overflow-x-auto">
@@ -159,7 +157,7 @@ export default function DataTable({
                 Loading...
               </td>
             </tr>
-          ) : result.length === 0 ? (
+          ) : showEmpty ? (
             <tr>
               <td colSpan={columns.length} className="px-4 py-8 text-center text-gray-500">
                 {emptyMessage}

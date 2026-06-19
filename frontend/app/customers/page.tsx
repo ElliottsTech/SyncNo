@@ -3,21 +3,25 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import DataTable from '../../components/DataTable';
 import Pagination from '../../components/Pagination';
+import { useListState } from '../../lib/useUrlState';
 
 const API = '/api';
 
 export default function CustomersPage() {
   const [customers, setCustomers] = useState([]);
-  const [search, setSearch] = useState('');
-  const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, limit: 50, total: 0 });
   const [loading, setLoading] = useState(true);
-  const [sortCol, setSortCol] = useState<string | null>('business_name');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc' | null>('asc');
-  const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
+  const [listState, { setPage, setSort, setFilters, setSearch }] = useListState({
+    page: 1,
+    sortCol: 'business_name',
+    sortDir: 'asc',
+    columnFilters: {},
+    search: '',
+  });
 
   const fetchCustomers = useCallback(() => {
     setLoading(true);
+    const { page, sortCol, sortDir, columnFilters, search } = listState;
     const sort = sortCol && sortDir ? `&sortCol=${sortCol}&sortDir=${sortDir}` : '';
     const globalSearch = search ? `&search=${encodeURIComponent(search)}` : '';
     const colFilters = Object.entries(columnFilters)
@@ -31,26 +35,18 @@ export default function CustomersPage() {
         setPagination(d.pagination);
         setLoading(false);
       });
-  }, [page, search, sortCol, sortDir, columnFilters]);
+  }, [listState]);
 
   useEffect(() => {
     fetchCustomers();
   }, [fetchCustomers]);
 
-  const handleSearch = (val: string) => {
-    setSearch(val);
-    setPage(1);
-  };
-
   const handleSortChange = (col: string, dir: 'asc' | 'desc' | null) => {
-    setSortCol(col);
-    setSortDir(dir);
-    setPage(1);
+    setSort(col, dir);
   };
 
   const handleFilterChange = (filters: Record<string, string>) => {
-    setColumnFilters(filters);
-    setPage(1);
+    setFilters(filters);
   };
 
   const columns = [
@@ -76,8 +72,8 @@ export default function CustomersPage() {
         <input
           type="text"
           placeholder="Global search..."
-          value={search}
-          onChange={e => handleSearch(e.target.value)}
+          value={listState.search || ''}
+          onChange={e => setSearch(e.target.value)}
           className="border px-3 py-2 rounded w-64"
         />
       </div>
@@ -86,8 +82,8 @@ export default function CustomersPage() {
         columns={columns}
         data={customers}
         serverSide
-        sortCol={sortCol}
-        sortDir={sortDir}
+        sortCol={listState.sortCol}
+        sortDir={listState.sortDir}
         onSortChange={handleSortChange}
         onFilterChange={handleFilterChange}
         loading={loading}

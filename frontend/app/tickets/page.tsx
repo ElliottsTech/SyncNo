@@ -4,20 +4,24 @@ import Link from 'next/link';
 import DataTable from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
+import { useListState } from '../../lib/useUrlState';
 
 const API = '/api';
 
 export default function TicketsPage() {
   const [tickets, setTickets] = useState([]);
-  const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, limit: 100, total: 0 });
   const [loading, setLoading] = useState(true);
-  const [sortCol, setSortCol] = useState<string | null>('created_at');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc' | null>('desc');
-  const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
+  const [listState, { setPage, setSort, setFilters }] = useListState({
+    page: 1,
+    sortCol: 'created_at',
+    sortDir: 'desc',
+    columnFilters: {},
+  });
 
   const fetchTickets = useCallback(() => {
     setLoading(true);
+    const { page, sortCol, sortDir, columnFilters } = listState;
     const sort = sortCol && sortDir ? `&sortCol=${sortCol}&sortDir=${sortDir}` : '';
     const colFilters = Object.entries(columnFilters)
       .filter(([_, v]) => v)
@@ -30,21 +34,18 @@ export default function TicketsPage() {
         setPagination(d.pagination);
         setLoading(false);
       });
-  }, [page, sortCol, sortDir, columnFilters]);
+  }, [listState]);
 
   useEffect(() => {
     fetchTickets();
   }, [fetchTickets]);
 
   const handleSortChange = (col: string, dir: 'asc' | 'desc' | null) => {
-    setSortCol(col);
-    setSortDir(dir);
-    setPage(1);
+    setSort(col, dir);
   };
 
   const handleFilterChange = (filters: Record<string, string>) => {
-    setColumnFilters(filters);
-    setPage(1);
+    setFilters(filters);
   };
 
   const statusVariant = (status: string) => {
@@ -78,8 +79,8 @@ export default function TicketsPage() {
         columns={columns}
         data={tickets}
         serverSide
-        sortCol={sortCol}
-        sortDir={sortDir}
+        sortCol={listState.sortCol}
+        sortDir={listState.sortDir}
         onSortChange={handleSortChange}
         onFilterChange={handleFilterChange}
         loading={loading}
