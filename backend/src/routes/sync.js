@@ -1725,29 +1725,29 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
             !v.updated_at ||
             v.updated_at > localMax;
 
+          // Syncro /vendors list returns full record shape; detail endpoint 401s with
+          // current API key, so we use the list record directly.
           if (shouldSync) {
             try {
-              const detailData = await fetchJson(`${baseUrl}/vendors/${v.id}`, 'vendors');
-              const detail = detailData.vendor || detailData;
               db.prepare(`
                 INSERT OR REPLACE INTO vendors (id, name, rep_first_name, rep_last_name, email, phone, account_number, created_at, updated_at, address, city, state, zip, website, notes, raw_json, synced)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
               `).run(
-                detail.id, detail.name || '',
-                detail.rep_first_name || '', detail.rep_last_name || '',
-                detail.email || '', detail.phone || '',
-                detail.account_number || '',
-                detail.created_at || '', detail.updated_at || '',
-                detail.address || '', detail.city || '',
-                detail.state || '', detail.zip || '',
-                detail.website || '', detail.notes || '', JSON.stringify(detail)
+                v.id, v.name || '',
+                v.rep_first_name || '', v.rep_last_name || '',
+                v.email || '', v.phone || '',
+                v.account_number || '',
+                v.created_at || '', v.updated_at || '',
+                v.address || '', v.city || '',
+                v.state || '', v.zip || '',
+                v.website || '', v.notes || '', JSON.stringify(v)
               );
               if (!existing) inserts++;
-              if (detail.updated_at && detail.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = detail.updated_at;
-            } catch (detailErr) {
+              if (v.updated_at && v.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = v.updated_at;
+            } catch (insertErr) {
               if (syncSignal.aborted) throw new Error('Sync cancelled');
               results.errors = results.errors || [];
-              results.errors.push(`vendors/${v.id}: ${detailErr.message}`);
+              results.errors.push(`vendors/${v.id}: ${insertErr.message}`);
             }
           }
 
