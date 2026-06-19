@@ -60,6 +60,23 @@ router.get('/', (req, res) => {
     })));
   }
 
+  // Search product serials
+  if (!type || type === 'serial') {
+    const serials = db.prepare(`
+      SELECT serial_number, product_id, status, 'serial' as type
+      FROM product_serials
+      WHERE serial_number LIKE ?
+      LIMIT 25
+    `).all(searchTerm);
+    results.push(...serials.map(s => ({
+      ...s,
+      // Use serial_number as id for routing — /serials/[serial]
+      id: s.serial_number,
+      title: s.serial_number,
+      subtitle: `Serial · ${s.status || 'unknown'}`,
+    })));
+  }
+
   res.json({ data: results });
 });
 

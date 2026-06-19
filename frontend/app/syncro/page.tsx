@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import SyncTerminal from '@/components/SyncTerminal';
 import type { HttpLogEntry } from '@/components/SyncTerminal';
+import { usePageTitle } from '../../lib/usePageTitle';
 
 // Sync API calls go directly to backend, bypassing NextAuth proxy
 // Use backend port so auth middleware doesn't block status checks
@@ -12,7 +13,7 @@ const API = (typeof window !== 'undefined' && window.location.port === '3001')
   ? 'http://localhost:3002/api'  // local Docker: browser→frontend:3001 but sync→backend:3002
   : '/api';  // fallback: use proxy (auth required)
 
-type Phase = 'customers' | 'contacts' | 'tickets' | 'invoices' | 'assets' | 'estimates' | 'purchase_orders' | 'vendors' | 'products';
+type Phase = 'customers' | 'contacts' | 'tickets' | 'invoices' | 'assets' | 'estimates' | 'purchase_orders' | 'vendors' | 'products' | 'payments' | 'product_serials';
 
 type PhaseProgress = {
   phase: Phase;
@@ -28,7 +29,7 @@ type LastResult = {
   last_sync: string | null;
 };
 
-const ENTITY_PHASES: Phase[] = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
+const ENTITY_PHASES: Phase[] = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials'];
 
 const PHASE_LABELS: Record<Phase, string> = {
   customers: 'Customers',
@@ -40,6 +41,8 @@ const PHASE_LABELS: Record<Phase, string> = {
   purchase_orders: 'Purchase Orders',
   vendors: 'Vendors',
   products: 'Products',
+  payments: 'Payments',
+  product_serials: 'Product Serials',
 };
 
 type ActiveSync = {
@@ -152,6 +155,7 @@ function SchedulerSection() {
 }
 
 export default function SyncroPage() {
+  usePageTitle('Syncro Sync — Syncno');
   const { data: session, status: authStatus } = useSession();
   const router = useRouter();
 
@@ -167,6 +171,7 @@ export default function SyncroPage() {
   const [entityStatus, setEntityStatus] = useState<Record<Phase, PhaseProgress | null>>({
     customers: null, contacts: null, tickets: null, invoices: null,
     assets: null, estimates: null, purchase_orders: null, vendors: null, products: null,
+    payments: null, product_serials: null,
   });
 
   const [lastResults, setLastResults] = useState<Record<Phase, LastResult>>({
@@ -179,12 +184,15 @@ export default function SyncroPage() {
     purchase_orders: { count: 0, error: null, last_sync: null },
     vendors: { count: 0, error: null, last_sync: null },
     products: { count: 0, error: null, last_sync: null },
+    payments: { count: 0, error: null, last_sync: null },
+    product_serials: { count: 0, error: null, last_sync: null },
   });
 
   const [syncAllSyncing, setSyncAllSyncing] = useState(false);
   const [syncAllProgress, setSyncAllProgress] = useState<Record<Phase, PhaseProgress | null>>({
     customers: null, contacts: null, tickets: null, invoices: null,
     assets: null, estimates: null, purchase_orders: null, vendors: null, products: null,
+    payments: null, product_serials: null,
   });
 
   const [previewing, setPreviewing] = useState(false);
@@ -213,7 +221,7 @@ export default function SyncroPage() {
       .then(r => r.json())
       .then(data => {
         // Check if any entity has a non-idle phase
-        const states = [data.tickets, data.customers, data.contacts, data.invoices, data.assets, data.estimates, data.purchase_orders, data.vendors, data.products];
+        const states = [data.tickets, data.customers, data.contacts, data.invoices, data.assets, data.estimates, data.purchase_orders, data.vendors, data.products, data.payments, data.product_serials];
         const anyRunning = states.some(s => s && s.phase && s.phase !== 'idle' && s.phase !== 'error');
 
         if (anyRunning) {
@@ -231,6 +239,8 @@ export default function SyncroPage() {
             purchase_orders: buildProgressFromState('purchase_orders', data.purchase_orders),
             vendors: buildProgressFromState('vendors', data.vendors),
             products: buildProgressFromState('products', data.products),
+            payments: buildProgressFromState('payments', data.payments),
+            product_serials: buildProgressFromState('product_serials', data.product_serials),
           };
           // Prefer sessionStorage progress if available, otherwise use backend state (never null)
           const mergedProgress = storedProgress || backendProgress;
@@ -281,7 +291,7 @@ export default function SyncroPage() {
         syncsInFlight.current.clear();
         sessionStorage.removeItem('activeSyncs');
         setSyncAllSyncing(false);
-        setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null });
+        setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null, payments: null, product_serials: null });
         // Restore completedSync from sessionStorage so View Terminal still works after refresh
         const savedKey = loadActiveSyncKey();
         if (savedKey) {
@@ -327,13 +337,13 @@ export default function SyncroPage() {
       try {
         const res = await fetch(`${API}/sync/progress`);
         const data = await res.json();
-        const states = [data.tickets, data.customers, data.contacts, data.invoices, data.assets, data.estimates, data.purchase_orders, data.vendors, data.products];
+        const states = [data.tickets, data.customers, data.contacts, data.invoices, data.assets, data.estimates, data.purchase_orders, data.vendors, data.products, data.payments, data.product_serials];
         const anyRunning = states.some(s => s && s.phase && s.phase !== 'idle' && s.phase !== 'error');
         if (!anyRunning) {
           clearInterval(pollIntervalRef.current!);
           pollIntervalRef.current = null;
           setSyncAllSyncing(false);
-          setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null });
+          setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null, payments: null, product_serials: null });
           setActiveSyncs({});
           fetchStatus();
           return;
@@ -348,6 +358,8 @@ export default function SyncroPage() {
           purchase_orders: buildProgressFromState('purchase_orders', data.purchase_orders),
           vendors: buildProgressFromState('vendors', data.vendors),
             products: buildProgressFromState('products', data.products),
+            payments: buildProgressFromState('payments', data.payments),
+            product_serials: buildProgressFromState('product_serials', data.product_serials),
         });
       } catch (_) {}
     }, 3000);
@@ -398,6 +410,8 @@ export default function SyncroPage() {
           purchase_orders: data.purchase_orders || { count: 0, error: null, last_sync: null },
           vendors: data.vendors || { count: 0, error: null, last_sync: null },
           products: data.products || { count: 0, error: null, last_sync: null },
+          payments: data.payments || { count: 0, error: null, last_sync: null },
+          product_serials: data.product_serials || { count: 0, error: null, last_sync: null },
         });
       })
       .catch(() => {});
@@ -444,7 +458,7 @@ export default function SyncroPage() {
     });
     if (isAll) {
       setSyncAllSyncing(false);
-      setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null });
+      setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null, payments: null, product_serials: null });
       sessionStorage.removeItem('syncProgress');
       if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
     } else if (phase && phase !== 'all') {
@@ -539,7 +553,7 @@ export default function SyncroPage() {
     if (data.type === 'cancelled' || data.status === 'cancelled') {
       syncFinalizedRef.current['entity:all'] = true;
       setSyncAllSyncing(false);
-      const next = { customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null };
+      const next = { customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null, payments: null, product_serials: null };
       setSyncAllProgress(next);
       sessionStorage.removeItem('syncProgress');
       if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
@@ -730,7 +744,7 @@ export default function SyncroPage() {
     // Do NOT auto-open terminal — only via View Terminal button.
     setCompletedSync(null);
     setSyncAllSyncing(true);
-    setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null });
+    setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null, payments: null, product_serials: null });
 
     xhr.onprogress = () => {
       buffer += xhr.responseText.slice(buffer.length);

@@ -5,10 +5,12 @@ import Badge from '../../components/Badge';
 import DataTable from '../../components/DataTable';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
+import { usePageTitle } from '../../lib/usePageTitle';
 
 const API = '/api';
 
 export default function PurchaseOrdersPage() {
+  usePageTitle('Purchase Orders — Syncno');
   const [pos, setPos] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, limit: 50, total: 0 });
   const [loading, setLoading] = useState(true);

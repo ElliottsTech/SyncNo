@@ -88,8 +88,14 @@ router.get('/:id', (req, res) => {
 
   // Serials (for serialized products)
   const serials = db.prepare(`
-    SELECT id, serial_number, created_at, updated_at, raw_json
+    SELECT id, serial_number, status, created_at, updated_at, raw_json
     FROM product_serials WHERE product_id = ? ORDER BY created_at ASC
+  `).all(req.params.id);
+
+  // SKUs (vendor-linked)
+  const skus = db.prepare(`
+    SELECT id, vendor_name, vendor_id, sku
+    FROM product_skus WHERE product_id = ? ORDER BY vendor_name ASC, sku ASC
   `).all(req.params.id);
 
   // Resolve category record if product_category was a category path/name
@@ -120,6 +126,7 @@ router.get('/:id', (req, res) => {
   res.json({
     ...product,
     serials,
+    skus,
     category,
     usage: {
       tickets: ticketCount,

@@ -1,23 +1,39 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams, useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import Badge from '../../../components/Badge';
 import DataTable from '../../../components/DataTable';
 import RawJsonView from '../../../components/RawJsonView';
+import { usePageTitle } from '../../../lib/usePageTitle';
 
 const API = '/api';
 
-type Tab = 'overview' | 'tickets' | 'assets' | 'invoices' | 'estimates' | 'contacts';
+type Tab = 'overview' | 'tickets' | 'assets' | 'invoices' | 'estimates' | 'payments' | 'contacts';
 
 export default function CustomerDetail() {
   const { id } = useParams();
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const VALID_TABS: Tab[] = ['overview', 'tickets', 'assets', 'invoices', 'estimates', 'payments', 'contacts'];
+  const initialTab = searchParams.get('tab') as Tab;
   const [customer, setCustomer] = useState<any>(null);
-  const [tab, setTab] = useState<Tab>('overview');
+  const [tab, setTab] = useState<Tab>(VALID_TABS.includes(initialTab) ? initialTab : 'overview');
+
+  const changeTab = (next: Tab) => {
+    setTab(next);
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === 'overview') params.delete('tab');
+    else params.set('tab', next);
+    const qs = params.toString();
+    router.push(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
   const [tickets, setTickets] = useState<any[]>([]);
   const [assets, setAssets] = useState<any[]>([]);
   const [invoices, setInvoices] = useState<any[]>([]);
   const [estimates, setEstimates] = useState<any[]>([]);
+  const [payments, setPayments] = useState<any[]>([]);
   const [contacts, setContacts] = useState<any[]>([]);
   const [loaded, setLoaded] = useState(false);
 
@@ -29,17 +45,21 @@ export default function CustomerDetail() {
       fetch(`${API}/customers/${id}/assets`).then(r => r.json()),
       fetch(`${API}/customers/${id}/invoices`).then(r => r.json()),
       fetch(`${API}/customers/${id}/estimates`).then(r => r.json()),
+      fetch(`${API}/customers/${id}/payments`).then(r => r.json()),
       fetch(`${API}/customers/${id}/contacts`).then(r => r.json()),
-    ]).then(([cust, tkt, ast, inv, est, con]) => {
+    ]).then(([cust, tkt, ast, inv, est, pay, con]) => {
       setCustomer(cust);
       setTickets(tkt.data || []);
       setAssets(ast);
       setInvoices(inv);
       setEstimates(est);
+      setPayments(pay);
       setContacts(con);
       setLoaded(true);
     });
   }, [id]);
+
+  usePageTitle(customer ? `${customer.business_name || customer.fullname || 'Customer'} — Syncno` : null);
 
   if (!customer) return <p className="text-gray-500">Loading...</p>;
 
@@ -53,6 +73,7 @@ export default function CustomerDetail() {
     { key: 'assets', label: tabLabel('assets', 'Assets', assets.length) },
     { key: 'invoices', label: tabLabel('invoices', 'Invoices', invoices.length) },
     { key: 'estimates', label: tabLabel('estimates', 'Estimates', estimates.length) },
+    { key: 'payments', label: tabLabel('payments', 'Payments', payments.length) },
     { key: 'contacts', label: tabLabel('contacts', 'Contacts', contacts.length) },
   ];
 
@@ -85,7 +106,7 @@ export default function CustomerDetail() {
         {tabs.map(t => (
           <button
             key={t.key}
-            onClick={() => setTab(t.key)}
+            onClick={() => changeTab(t.key)}
             className={`px-4 py-2 text-sm font-medium ${
               tab === t.key ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500 hover:text-gray-700'
             }`}
@@ -150,7 +171,7 @@ export default function CustomerDetail() {
       {tab === 'invoices' && (
         <DataTable
           columns={[
-            { key: 'number', label: '#' },
+            { key: 'number', label: '#', render: (v, r) => <Link href={`/invoices/${r.id}`} className="text-blue-600 hover:underline">{v}</Link> },
             { key: 'date', label: 'Date', render: v => v ? new Date(v).toLocaleDateString() : '' },
             { key: 'due_date', label: 'Due', render: v => v ? new Date(v).toLocaleDateString() : '' },
             { key: 'total', label: 'Total' },
@@ -164,7 +185,7 @@ export default function CustomerDetail() {
       {tab === 'estimates' && (
         <DataTable
           columns={[
-            { key: 'number', label: '#' },
+            { key: 'number', label: '#', render: (v, r) => <Link href={`/estimates/${r.id}`} className="text-blue-600 hover:underline">{v}</Link> },
             { key: 'status', label: 'Status', render: v => <Badge>{v}</Badge> },
             { key: 'date', label: 'Date', render: v => v ? new Date(v).toLocaleDateString() : '' },
             { key: 'total', label: 'Total' },
@@ -174,13 +195,32 @@ export default function CustomerDetail() {
         />
       )}
 
+      {tab === 'payments' && (
+        <DataTable
+          columns={[
+            { key: 'ref_num', label: 'Ref', render: (v, r) => <Link href={`/payments/${r.id}`} className="text-blue-600 hover:underline font-mono">{v || r.id}</Link> },
+            { key: 'applied_at', label: 'Applied', render: v => v ? new Date(v).toLocaleDateString() : '' },
+            { key: 'payment_amount', label: 'Amount', render: v => v ? `$${parseFloat(v).toFixed(2)}` : '' },
+            { key: 'payment_method', label: 'Method' },
+            {
+              key: 'invoice_ids', label: 'Invoices',
+              render: (v) => Array.isArray(v) && v.length > 0
+                ? <span className="flex flex-wrap gap-2">{v.map((id: any) => <Link key={id} href={`/invoices/${id}`} className="text-blue-600 hover:underline font-mono text-xs">#{id}</Link>)}</span>
+                : <span className="text-gray-400">—</span>,
+            },
+          ]}
+          data={payments}
+          emptyMessage="No payments"
+        />
+      )}
+
       {tab === 'contacts' && (
         <DataTable
           columns={[
             { key: 'name', label: 'Name' },
-            { key: 'email', label: 'Email' },
-            { key: 'phone', label: 'Phone' },
-            { key: 'mobile', label: 'Mobile' },
+            { key: 'email', label: 'Email', render: (v) => v ? <a href={`mailto:${v}`} className="text-blue-600 hover:underline">{v}</a> : '' },
+            { key: 'phone', label: 'Phone', render: (v) => v ? <a href={`tel:${v.replace(/[^+\d]/g, '')}`} className="text-blue-600 hover:underline">{v}</a> : '' },
+            { key: 'mobile', label: 'Mobile', render: (v) => v ? <a href={`tel:${v.replace(/[^+\d]/g, '')}`} className="text-blue-600 hover:underline">{v}</a> : '' },
           ]}
           data={contacts}
           emptyMessage="No contacts"

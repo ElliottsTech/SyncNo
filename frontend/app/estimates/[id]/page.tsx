@@ -4,6 +4,7 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import Badge from '../../../components/Badge';
 import RawJsonView from '../../../components/RawJsonView';
+import { usePageTitle } from '../../../lib/usePageTitle';
 
 const API = '/api';
 
@@ -17,6 +18,8 @@ export default function EstimateDetail() {
       .then(r => r.json())
       .then(setEstimate);
   }, [id]);
+
+  usePageTitle(estimate ? `Estimate #${estimate.number} — Syncno` : null);
 
   if (!estimate) return <p className="text-gray-500">Loading...</p>;
 
@@ -118,6 +121,30 @@ export default function EstimateDetail() {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {(estimate.ticket_id || estimate.invoice_id) && (
+        <div className="mt-6 bg-white rounded border p-4 grid grid-cols-2 gap-4">
+          {estimate.ticket_id && (
+            <div>
+              <h3 className="font-semibold mb-1">Linked Ticket</h3>
+              <Link href={`/tickets/${estimate.ticket_id}`} className="text-blue-600 hover:underline">
+                Ticket #{estimate.ticket?.number || estimate.ticket_id}
+              </Link>
+              {estimate.ticket?.subject && (
+                <span className="text-gray-500 text-sm ml-2">· {estimate.ticket.subject}</span>
+              )}
+            </div>
+          )}
+          {estimate.invoice_id && (
+            <div>
+              <h3 className="font-semibold mb-1">Converted to Invoice</h3>
+              <Link href={`/invoices/${estimate.invoice_id}`} className="text-blue-600 hover:underline">
+                Invoice #{estimate.invoice?.number || estimate.invoice_id}
+              </Link>
+            </div>
+          )}
         </div>
       )}
 

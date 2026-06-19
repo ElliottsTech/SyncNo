@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import { usePageTitle } from '../../../lib/usePageTitle';
 import Badge from '../../../components/Badge';
 import DataTable from '../../../components/DataTable';
 import RawJsonView from '../../../components/RawJsonView';
@@ -25,6 +26,8 @@ export default function InvoiceDetail() {
       .then(r => r.json())
       .then(setLinkedTicket);
   }, [id]);
+
+  usePageTitle(invoice ? `Invoice #${invoice.number} — Syncno` : null);
 
   if (!invoice) return <p className="text-gray-500">Loading...</p>;
 
@@ -150,6 +153,7 @@ export default function InvoiceDetail() {
               <thead>
                 <tr className="text-left text-gray-500 border-b bg-gray-50">
                   <th className="px-4 py-3 text-xs font-medium uppercase">Product</th>
+                  <th className="px-4 py-3 text-xs font-medium uppercase">Serial</th>
                   <th className="px-4 py-3 text-xs font-medium uppercase">Description</th>
                   <th className="px-4 py-3 text-xs font-medium uppercase">Qty</th>
                   <th className="px-4 py-3 text-xs font-medium uppercase">Price</th>
@@ -168,10 +172,61 @@ export default function InvoiceDetail() {
                         <span>{li.product_name || li.name || 'N/A'}</span>
                       )}
                     </td>
+                    <td className="px-4 py-3">
+                      {li.serial_number ? (
+                        <Link href={`/serials/${encodeURIComponent(li.serial_number)}`} className="text-blue-600 hover:underline font-mono text-xs">
+                          {li.serial_number}
+                        </Link>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3">{li.description || '—'}</td>
                     <td className="px-4 py-3">{li.quantity || 1}</td>
                     <td className="px-4 py-3">${parseFloat(li.price || li.unit_price || 0).toFixed(2)}</td>
                     <td className="px-4 py-3">${parseFloat(li.total || (li.quantity * li.price) || 0).toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {invoice.originating_estimate && (
+        <div className="mt-6 bg-white rounded border p-4">
+          <h2 className="text-lg font-semibold mb-2">Originating Estimate</h2>
+          <Link href={`/estimates/${invoice.originating_estimate.id}`} className="text-blue-600 hover:underline">
+            Estimate #{invoice.originating_estimate.number}
+          </Link>
+          <span className="text-gray-500 text-sm ml-2">
+            {invoice.originating_estimate.status} · ${parseFloat(invoice.originating_estimate.total || 0).toFixed(2)}
+          </span>
+        </div>
+      )}
+
+      {invoice.payments && invoice.payments.length > 0 && (
+        <div className="mt-6">
+          <h2 className="text-lg font-semibold mb-3">Payments ({invoice.payments.length})</h2>
+          <div className="bg-white rounded border overflow-hidden">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="text-left text-gray-500 border-b bg-gray-50">
+                  <th className="px-4 py-3 text-xs font-medium uppercase">Ref</th>
+                  <th className="px-4 py-3 text-xs font-medium uppercase">Applied</th>
+                  <th className="px-4 py-3 text-xs font-medium uppercase">Amount</th>
+                  <th className="px-4 py-3 text-xs font-medium uppercase">Method</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {invoice.payments.map((p: any) => (
+                  <tr key={p.id}>
+                    <td className="px-4 py-3">
+                      <Link href={`/payments/${p.id}`} className="text-blue-600 hover:underline font-mono">{p.ref_num || p.id}</Link>
+                    </td>
+                    <td className="px-4 py-3">{p.applied_at ? new Date(p.applied_at).toLocaleDateString() : '—'}</td>
+                    <td className="px-4 py-3">${parseFloat(p.payment_amount || 0).toFixed(2)}</td>
+                    <td className="px-4 py-3">{p.payment_method || '—'}</td>
                   </tr>
                 ))}
               </tbody>

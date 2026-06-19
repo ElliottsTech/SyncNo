@@ -70,6 +70,34 @@ try {
   const db = getDb();
   db.prepare("ALTER TABLE products ADD COLUMN deleted_at TEXT DEFAULT NULL").run();
 } catch (_) {}
+try {
+  const db = getDb();
+  db.prepare("ALTER TABLE product_serials ADD COLUMN status TEXT").run();
+} catch (_) {}
+try {
+  const db = getDb();
+  db.prepare("ALTER TABLE product_serials ADD COLUMN line_item_id INTEGER").run();
+} catch (_) {}
+try {
+  const db = getDb();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_product_serials_serial ON product_serials(serial_number)").run();
+} catch (_) {}
+try {
+  const db = getDb();
+  db.prepare("ALTER TABLE payments ADD COLUMN customer_id INTEGER").run();
+} catch (_) {}
+try {
+  const db = getDb();
+  db.prepare("ALTER TABLE payments ADD COLUMN raw_json TEXT").run();
+} catch (_) {}
+try {
+  const db = getDb();
+  db.prepare("ALTER TABLE payments ADD COLUMN synced INTEGER DEFAULT 0").run();
+} catch (_) {}
+try {
+  const db = getDb();
+  db.prepare("CREATE INDEX IF NOT EXISTS idx_payments_customer ON payments(customer_id)").run();
+} catch (_) {}
 
 // In-memory abort controller for cancelling running sync
 // Per-sync abort controllers keyed by sync ID (entity name or 'all').
@@ -260,7 +288,7 @@ router.get('/status', (req, res) => {
 
 router.get('/last-results', (req, res) => {
   const db = getDb();
-  const entities = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
+  const entities = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials'];
   const results = {};
   for (const ent of entities) {
     const state = getSyncState(ent);
@@ -286,6 +314,8 @@ router.get('/progress', (req, res) => {
   const poState = getSyncState('purchase_orders');
   const vendorState = getSyncState('vendors');
   const productState = getSyncState('products');
+  const paymentState = getSyncState('payments');
+  const productSerialsState = getSyncState('product_serials');
 
   res.json({
     tickets: ticketState,
@@ -297,6 +327,8 @@ router.get('/progress', (req, res) => {
     purchase_orders: poState,
     vendors: vendorState,
     products: productState,
+    payments: paymentState,
+    product_serials: productSerialsState,
   });
 });
 
@@ -452,7 +484,7 @@ router.post('/trigger', async (req, res) => {
   rateLimitHits = 0;
 
   // Check if this entity is already running
-  const ALL_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
+  const ALL_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials'];
   const entitiesToRun = entity && entity !== 'all'
     ? [entity]
     : ALL_ENTITIES;
@@ -1306,12 +1338,12 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
                 INSERT OR REPLACE INTO invoices (id, customer_id, customer_business_then_name, number, created_at, updated_at, date, due_date, subtotal, total, tax, verified_paid, tech_marked_paid, ticket_id, pdf_url, is_paid, location_id, po_number, contact_id, note, hardwarecost, user_id, raw_json, synced)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
               `).run(
-                detail.id, detail.customer_id,
+                detail.id, detail.customer_id || detail.customer?.id || null,
                 detail.customer_business_then_name || detail.customer?.business_name || detail.customer?.fullname || '',
                 String(detail.number || ''), detail.created_at || '', detail.updated_at || '',
                 detail.date || '', detail.due_date || '', detail.subtotal || '', detail.total || '', detail.tax || '',
                 detail.verified_paid ? 1 : 0, detail.tech_marked_paid ? 1 : 0,
-                detail.ticket_id || '', detail.pdf_url || '',
+                detail.ticket_id ? String(Number(detail.ticket_id)) : '', detail.pdf_url || '',
                 detail.is_paid ? 1 : 0, detail.location_id || '',
                 detail.po_number || '', detail.contact_id || '',
                 detail.note || '', detail.hardwarecost || '', detail.user_id || '', JSON.stringify(detail)
@@ -1521,13 +1553,13 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
                 INSERT OR REPLACE INTO estimates (id, customer_business_then_name, number, status, created_at, updated_at, customer_id, date, subtotal, total, tax, ticket_id, pdf_url, location_id, invoice_id, employee, raw_json, synced)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
               `).run(
-                detail.id, detail.customer_business_then_name || '',
+                detail.id, detail.customer_business_then_name || detail.customer?.business_name || detail.customer?.fullname || '',
                 String(detail.number || ''), detail.status || '',
                 detail.created_at || '', detail.updated_at || '',
-                detail.customer_id || null, detail.date || '',
+                detail.customer_id || detail.customer?.id || null, detail.date || '',
                 detail.subtotal || '', detail.total || '', detail.tax || '',
-                detail.ticket_id || '', detail.pdf_url || '',
-                detail.location_id || '', detail.invoice_id || '',
+                detail.ticket_id ? String(Number(detail.ticket_id)) : '', detail.pdf_url || '',
+                detail.location_id || '', detail.invoice_id ? String(Number(detail.invoice_id)) : '',
                 detail.employee || '', JSON.stringify(detail)
               );
               if (!existing) inserts++;
@@ -1787,6 +1819,112 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
     }
   }
 
+  // ─── Payments sync ──────────────────────────────────────────────────────────
+
+  async function syncPayments() {
+    emitEvent({ phase: 'payments', status: 'started' }, res);
+    const localMax = forceAll ? null : (getSetting('last_sync_payments') || null);
+    const state = getSyncState('payments');
+
+    const resumeOffset = forceAll ? 0 : (state.detail_item_index || 0);
+
+    let absoluteIndex = 0;
+    let latestUpdatedAt = localMax;
+    let inserts = 0;
+
+    try {
+      const page1 = await fetchJson(`${baseUrl}/payments?page=1&per_page=100`, 'payments');
+      const totalPages = page1.meta?.total_pages || 1;
+      const total = await computeTotalRecords(page1, 'payments', 'payments');
+
+      state.phase = 'detail';
+      state.detail_total = total;
+      state.detail_synced = 0;
+      if (forceAll) {
+        state.detail_page = 1;
+        state.detail_item_index = 0;
+      }
+      saveSyncState(state);
+
+      for (let page = 1; page <= totalPages; page++) {
+        const data = page === 1 ? page1 : await fetchJson(`${baseUrl}/payments?page=${page}&per_page=100`, 'payments');
+        checkAbort();
+        const payments = data.payments || [];
+
+        for (const p of payments) {
+          absoluteIndex++;
+          checkAbort();
+          if (absoluteIndex <= resumeOffset) continue;
+
+          const existing = db.prepare('SELECT id FROM payments WHERE id = ?').get(p.id);
+          const shouldSync =
+            forceAll ||
+            !existing ||
+            !localMax ||
+            !p.updated_at ||
+            p.updated_at > localMax;
+
+          if (shouldSync) {
+            try {
+              db.prepare(`
+                INSERT OR REPLACE INTO payments (id, created_at, updated_at, success, payment_amount, invoice_ids, ref_num, applied_at, payment_method, customer, customer_id, raw_json, synced)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+              `).run(
+                p.id, p.created_at || '', p.updated_at || '',
+                p.success ? 1 : 0,
+                String(p.payment_amount ?? ''),
+                JSON.stringify(p.invoice_ids || []),
+                p.ref_num || '', p.applied_at || '',
+                p.payment_method || '',
+                p.customer ? JSON.stringify(p.customer) : '',
+                p.customer_id || p.customer?.id || null,
+                JSON.stringify(p)
+              );
+              if (!existing) inserts++;
+              if (p.updated_at && p.updated_at > (latestUpdatedAt || '')) latestUpdatedAt = p.updated_at;
+            } catch (detailErr) {
+              if (syncSignal.aborted) throw new Error('Sync cancelled');
+              results.errors = results.errors || [];
+              results.errors.push(`payments/${p.id}: ${detailErr.message}`);
+            }
+          }
+
+          state.detail_page = page;
+          state.detail_item_index = absoluteIndex;
+          saveSyncState(state);
+          emitEvent({ phase: 'payments', status: 'progress', current: absoluteIndex, total, currentRecordId: p.id, currentRecordName: p.ref_num || '' }, res);
+          await new Promise((resolve, reject) => {
+            const t = setTimeout(resolve, 350);
+            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
+          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+        }
+
+        if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
+      }
+
+      if (latestUpdatedAt) setSetting('last_sync_payments', latestUpdatedAt);
+      results.payments = absoluteIndex;
+      results.paymentsInserted = inserts;
+      state.phase = 'idle';
+      state.detail_page = 1;
+      state.detail_item_index = 0;
+      state.last_result_count = inserts;
+      state.last_result_error = null;
+      saveSyncState(state);
+      log('SYNC_ENTITY', `Payments: ${absoluteIndex} iterated, ${inserts} inserted`);
+      emitEvent({ phase: 'payments', status: 'done', count: inserts }, res);
+      clearEventsForEntity('payments');
+    } catch (e) {
+      state.phase = 'error';
+      state.last_result_error = e.message;
+      saveSyncState(state);
+      results.errors = results.errors || [];
+      results.errors.push(`payments: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent({ phase: 'payments', status: 'error', error: e.message }, res);
+    }
+  }
+
   // ─── Products sync ──────────────────────────────────────────────────────────
   // Syncro /products list returns full record shape (same as detail), so no detail
   // phase needed. Sub-phases: categories (one page), serials (per serialized product).
@@ -1920,8 +2058,8 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
       // Sub-phase: categories (small, single fetch)
       await syncProductCategories();
 
-      // Sub-phase: serials (per serialized product)
-      await syncProductSerials();
+      // Sub-phase: SKUs (all products)
+      await syncProductSkus();
     } catch (e) {
       state.phase = 'error';
       state.last_result_error = e.message;
@@ -1962,42 +2100,148 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
   }
 
   async function syncProductSerials() {
+    emitEvent({ phase: 'product_serials', status: 'started' }, res);
+    const state = getSyncState('product_serials');
     // Only fetch serials for serialized products (large payloads otherwise)
     const serialized = db.prepare('SELECT id, name FROM products WHERE serialized = 1 AND deleted_at IS NULL').all();
     if (serialized.length === 0) {
-      emitEvent({ phase: 'products', status: 'progress', subphase: 'serials', message: 'No serialized products — skipping serials' }, res);
+      emitEvent({ phase: 'product_serials', status: 'progress', message: 'No serialized products — skipping serials' }, res);
+      state.phase = 'idle';
+      state.last_result_count = 0;
+      state.last_result_error = null;
+      saveSyncState(state);
       return;
     }
-    emitEvent({ phase: 'products', status: 'started', subphase: 'serials', message: `Fetching serials for ${serialized.length} serialized products...` }, res);
+    // Syncro returns 0 serials without a status filter — fetch each status variant separately.
+    const SERIAL_STATUSES = ['reserved', 'sold', 'returned', 'in_transfer', 'breakage', 'used_in_refurb', 'in_stock'];
+    state.phase = 'detail';
+    state.detail_total = serialized.length;
+    state.detail_synced = 0;
+    saveSyncState(state);
     let processed = 0;
-    for (const p of serialized) {
+    let totalSerials = 0;
+    const insertSerial = db.prepare(`
+      INSERT OR REPLACE INTO product_serials (id, product_id, serial_number, account_id, status, line_item_id, created_at, updated_at, raw_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    try {
+      for (const p of serialized) {
+        checkAbort();
+        let productCount = 0;
+        for (const st of SERIAL_STATUSES) {
+          checkAbort();
+          try {
+            // Paginate each status until an empty page comes back — Syncro returns no meta.total_pages.
+            for (let page = 1; ; page++) {
+              checkAbort();
+              const data = await fetchJson(`${baseUrl}/products/${p.id}/product_serials?status=${st}&page=${page}&per_page=100`, 'products_serials');
+              const serials = data.product_serials || [];
+              if (serials.length === 0) break;
+              const insertMany = db.transaction((rows) => {
+                for (const s of rows) {
+                  insertSerial.run(
+                    s.id, p.id, s.serial_number || s.serial || '',
+                    String(s.account_id ?? ''), s.status || '',
+                    s.line_item_id || null,
+                    s.created_at || '', s.updated_at || '',
+                    JSON.stringify(s)
+                  );
+                }
+              });
+              insertMany(serials);
+              productCount += serials.length;
+              if (serials.length < 100) break;
+            }
+          } catch (e) {
+            if (syncSignal.aborted) throw new Error('Sync cancelled');
+            results.errors = results.errors || [];
+            results.errors.push(`product_serials/${p.id}?status=${st}: ${e.message}`);
+          }
+        }
+        totalSerials += productCount;
+        processed++;
+        state.detail_synced = processed;
+        saveSyncState(state);
+        emitEvent({ phase: 'product_serials', status: 'progress', current: processed, total: serialized.length, message: `serials ${processed}/${serialized.length} — ${productCount} for ${p.name}`, currentRecordId: p.id, currentRecordName: p.name }, res);
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(resolve, 350);
+          syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
+        }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+      }
+      log('SYNC_ENTITY', `Product serials: iterated ${serialized.length} serialized products, ${totalSerials} serials upserted`);
+      state.phase = 'idle';
+      state.last_result_count = totalSerials;
+      state.last_result_error = null;
+      saveSyncState(state);
+      emitEvent({ phase: 'product_serials', status: 'done', count: totalSerials }, res);
+      clearEventsForEntity('product_serials');
+    } catch (e) {
+      state.phase = 'error';
+      state.last_result_error = e.message;
+      saveSyncState(state);
+      results.errors = results.errors || [];
+      results.errors.push(`product_serials: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent({ phase: 'product_serials', status: 'error', error: e.message }, res);
+    }
+  }
+
+  async function syncProductSkus() {
+    // SKUs apply to all products (not just serialized). Each SKU carries a vendor_name —
+    // resolve it to a vendor_id so the UI can link product → vendor.
+    const all = db.prepare('SELECT id, name FROM products WHERE deleted_at IS NULL').all();
+    if (all.length === 0) {
+      emitEvent({ phase: 'products', status: 'progress', subphase: 'skus', message: 'No products — skipping SKUs' }, res);
+      return;
+    }
+    // Vendor name → id lookup. Names are unique in practice; if duplicates exist, first wins.
+    const vendorRows = db.prepare('SELECT id, name FROM vendors').all();
+    const vendorByName = new Map();
+    for (const v of vendorRows) {
+      if (!vendorByName.has(v.name)) vendorByName.set(v.name, v.id);
+    }
+    emitEvent({ phase: 'products', status: 'started', subphase: 'skus', message: `Fetching SKUs for ${all.length} products...` }, res);
+    const insertSku = db.prepare(`
+      INSERT OR REPLACE INTO product_skus (id, product_id, vendor_name, vendor_id, sku, raw_json)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    let processed = 0;
+    let totalSkus = 0;
+    for (const p of all) {
       checkAbort();
       try {
-        const data = await fetchJson(`${baseUrl}/products/${p.id}/product_serials`, 'products_serials');
-        const serials = data.product_serials || [];
-        for (const s of serials) {
-          db.prepare(`
-            INSERT OR REPLACE INTO product_serials (id, product_id, serial_number, account_id, created_at, updated_at, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(
-            s.id, p.id, s.serial_number || s.serial || '',
-            String(s.account_id ?? ''), s.created_at || '', s.updated_at || '',
-            JSON.stringify(s)
-          );
+        const data = await fetchJson(`${baseUrl}/products/${p.id}/product_skus`, 'products_skus');
+        const skus = data.product_skus || [];
+        if (skus.length > 0) {
+          const insertMany = db.transaction((rows) => {
+            for (const s of rows) {
+              const vname = s.vendor_name || '';
+              insertSku.run(
+                s.id, p.id, vname,
+                vendorByName.get(vname) ?? null,
+                s.sku || '',
+                JSON.stringify(s)
+              );
+            }
+          });
+          insertMany(skus);
+          totalSkus += skus.length;
         }
       } catch (e) {
         if (syncSignal.aborted) throw new Error('Sync cancelled');
         results.errors = results.errors || [];
-        results.errors.push(`product_serials/${p.id}: ${e.message}`);
+        results.errors.push(`product_skus/${p.id}: ${e.message}`);
       }
       processed++;
-      emitEvent({ phase: 'products', status: 'progress', subphase: 'serials', current: processed, total: serialized.length, message: `serials ${processed}/${serialized.length}` }, res);
+      if (processed % 50 === 0 || processed === all.length) {
+        emitEvent({ phase: 'products', status: 'progress', subphase: 'skus', current: processed, total: all.length, message: `skus ${processed}/${all.length}` }, res);
+      }
       await new Promise((resolve, reject) => {
         const t = setTimeout(resolve, 350);
         syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
       }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
     }
-    log('SYNC_ENTITY', `Product serials: iterated ${serialized.length} serialized products`);
+    log('SYNC_ENTITY', `Product SKUs: iterated ${all.length} products, ${totalSkus} SKUs upserted`);
   }
 
   // ─── Run all entity syncs ───────────────────────────────────────────────────
@@ -2013,6 +2257,8 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
       else if (ent === 'purchase_orders') await syncPurchaseOrders();
       else if (ent === 'vendors') await syncVendors();
       else if (ent === 'products') await syncProducts();
+      else if (ent === 'payments') await syncPayments();
+      else if (ent === 'product_serials') await syncProductSerials();
     }
 
     results.duration = Date.now() - startTime;
@@ -2088,7 +2334,7 @@ router.post('/reset', (req, res) => {
 
 router.patch('/synced', (req, res) => {
   const { table, id, synced } = req.body;
-  const allowedTables = ['customers', 'contacts', 'tickets', 'assets', 'invoices', 'estimates', 'purchase_orders', 'vendors', 'products'];
+  const allowedTables = ['customers', 'contacts', 'tickets', 'assets', 'invoices', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments'];
   if (!table || !id || typeof synced !== 'boolean') {
     return res.status(400).json({ error: 'table, id, and synced required' });
   }
@@ -2109,7 +2355,7 @@ router.patch('/synced', (req, res) => {
 
 // ─── Daily scheduler ─────────────────────────────────────────────────────────
 
-const SCHEDULABLE_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
+const SCHEDULABLE_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials'];
 // Default staggered times — 15min apart starting 02:00
 const DEFAULT_SCHEDULE_TIMES = {
   customers: '02:00',
@@ -2121,6 +2367,8 @@ const DEFAULT_SCHEDULE_TIMES = {
   purchase_orders: '03:30',
   vendors: '03:45',
   products: '04:00',
+  payments: '04:15',
+  product_serials: '05:00',
 };
 const SCHEDULE_LAST_FIRES_TABLE = 'schedule_last_fired';
 

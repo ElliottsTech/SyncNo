@@ -4,10 +4,12 @@ import Link from 'next/link';
 import DataTable from '../../components/DataTable';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
+import { usePageTitle } from '../../lib/usePageTitle';
 
 const API = '/api';
 
 export default function CustomersPage() {
+  usePageTitle('Customers — Syncno');
   const [customers, setCustomers] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, limit: 50, total: 0 });
   const [loading, setLoading] = useState(true);

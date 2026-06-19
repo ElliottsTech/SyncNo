@@ -2,10 +2,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import DataTable from '../../components/DataTable';
+import { usePageTitle } from '../../lib/usePageTitle';
 
 const API = '/api';
 
 export default function VendorsPage() {
+  usePageTitle('Vendors — Syncno');
   const [vendors, setVendors] = useState([]);
 
   const fetchVendors = useCallback(() => {

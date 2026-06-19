@@ -2,10 +2,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
+import { usePageTitle } from '../../lib/usePageTitle';
 
 const API = '/api';
 
 export default function SearchPage() {
+  usePageTitle('Search — Syncno');
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -31,7 +33,16 @@ export default function SearchPage() {
     if (type === 'customer') return 'bg-blue-100 text-blue-800';
     if (type === 'ticket') return 'bg-green-100 text-green-800';
     if (type === 'vendor') return 'bg-purple-100 text-purple-800';
+    if (type === 'serial') return 'bg-orange-100 text-orange-800';
     return 'bg-gray-100 text-gray-800';
+  };
+
+  const linkFor = (r: any) => {
+    if (r.type === 'customer') return `/customers/${r.id}`;
+    if (r.type === 'ticket') return `/tickets/${r.id}`;
+    if (r.type === 'vendor') return `/vendors/${r.id}`;
+    if (r.type === 'serial') return `/serials/${encodeURIComponent(r.id)}`;
+    return '#';
   };
 
   return (
@@ -39,7 +50,7 @@ export default function SearchPage() {
       <h1 className="text-2xl font-bold mb-6">Search</h1>
       <input
         type="text"
-        placeholder="Search customers, tickets, vendors..."
+        placeholder="Search customers, tickets, vendors, serials..."
         value={query}
         onChange={e => setQuery(e.target.value)}
         className="border px-4 py-2 rounded w-full max-w-lg mb-6"
@@ -61,7 +72,7 @@ export default function SearchPage() {
                   {r.type}
                 </span>
                 <Link
-                  href={r.type === 'customer' ? `/customers/${r.id}` : r.type === 'ticket' ? `/tickets/${r.id}` : `/vendors/${r.id}`}
+                  href={linkFor(r)}
                   className="text-blue-600 hover:underline font-medium"
                 >
                   {r.title}

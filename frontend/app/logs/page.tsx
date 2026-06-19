@@ -3,6 +3,7 @@ import { useState, useEffect, Fragment } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import Pagination from '../../components/Pagination';
+import { usePageTitle } from '../../lib/usePageTitle';
 
 const API = '/api';
 
@@ -43,6 +44,7 @@ function RawDetails({ details }: { details: string }) {
 }
 
 export default function LogsPage() {
+  usePageTitle('Logs — Syncno');
   const [logs, setLogs] = useState([]);
   const [page, setPage] = useState(1);
   const [tab, setTab] = useState<Tab>('all');

@@ -3,10 +3,12 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import DataTable from '../../components/DataTable';
 import Pagination from '../../components/Pagination';
+import { usePageTitle } from '../../lib/usePageTitle';
 
 const API = '/api';
 
 export default function AssetsPage() {
+  usePageTitle('Assets — Syncno');
   const [data, setData] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);

@@ -175,7 +175,10 @@ CREATE TABLE IF NOT EXISTS payments (
   ref_num TEXT,
   applied_at TEXT,
   payment_method TEXT,
-  customer TEXT
+  customer TEXT,
+  customer_id INTEGER,
+  raw_json TEXT,
+  synced INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS vendors (
@@ -252,8 +255,19 @@ CREATE TABLE IF NOT EXISTS product_serials (
   product_id INTEGER,
   serial_number TEXT,
   account_id TEXT,
+  status TEXT,
+  line_item_id INTEGER,
   created_at TEXT,
   updated_at TEXT,
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS product_skus (
+  id INTEGER PRIMARY KEY,
+  product_id INTEGER,
+  vendor_name TEXT,
+  vendor_id INTEGER,
+  sku TEXT,
   raw_json TEXT
 );
 
@@ -336,6 +350,9 @@ CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(product_category);
 CREATE INDEX IF NOT EXISTS idx_product_categories_ancestry ON product_categories(ancestry);
 CREATE INDEX IF NOT EXISTS idx_product_serials_product ON product_serials(product_id);
+CREATE INDEX IF NOT EXISTS idx_product_serials_serial ON product_serials(serial_number);
+CREATE INDEX IF NOT EXISTS idx_product_skus_product ON product_skus(product_id);
+CREATE INDEX IF NOT EXISTS idx_product_skus_vendor ON product_skus(vendor_id);
 CREATE INDEX IF NOT EXISTS idx_ticket_line_items_product ON ticket_line_items(product_id);
 
 CREATE TABLE IF NOT EXISTS users (

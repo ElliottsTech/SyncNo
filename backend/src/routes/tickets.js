@@ -107,9 +107,10 @@ router.get('/:id/time_entries', (req, res) => {
 router.get('/:id/line_items', (req, res) => {
   const db = getDb();
   const lineItems = db.prepare(`
-    SELECT tli.*, tli.raw_json, p.name as product_name
+    SELECT tli.*, tli.raw_json, p.name as product_name, ps.serial_number
     FROM ticket_line_items tli
     LEFT JOIN products p ON tli.product_id = p.id
+    LEFT JOIN product_serials ps ON ps.line_item_id = tli.id
     WHERE tli.ticket_id = ?
     ORDER BY tli.created_at ASC
   `).all(req.params.id);
@@ -127,6 +128,18 @@ router.get('/:id/invoices', (req, res) => {
     ORDER BY date DESC
   `).all(req.params.id);
   res.json(invoices);
+});
+
+// GET /api/tickets/:id/estimates - all estimates linked to this ticket
+router.get('/:id/estimates', (req, res) => {
+  const db = getDb();
+  const estimates = db.prepare(`
+    SELECT id, number, status, date, subtotal, total, tax, invoice_id
+    FROM estimates
+    WHERE ticket_id = ?
+    ORDER BY date DESC
+  `).all(req.params.id);
+  res.json(estimates);
 });
 
 export default router;

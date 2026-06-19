@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import RawJsonView from '../../../components/RawJsonView';
+import { usePageTitle } from '../../../lib/usePageTitle';
 
 const API = '/api';
 
@@ -32,6 +33,8 @@ export default function AssetDetail() {
       .then(r => r.json())
       .then(setAsset);
   }, [id]);
+
+  usePageTitle(asset ? `${asset.name || 'Asset'} — Syncno` : null);
 
   if (!asset) return <p className="text-gray-500">Loading...</p>;
 
@@ -64,7 +67,9 @@ export default function AssetDetail() {
               <div>
                 <h1 className="text-xl font-bold">{asset.name}</h1>
                 <p className="text-gray-500 mt-1">
-                  {asset.asset_type} · {asset.asset_serial || 'No serial'}
+                  {asset.asset_type} · {asset.asset_serial
+                    ? <Link href={`/serials/${encodeURIComponent(asset.asset_serial)}`} className="text-blue-600 hover:underline font-mono">{asset.asset_serial}</Link>
+                    : 'No serial'}
                 </p>
               </div>
             </div>
@@ -77,7 +82,9 @@ export default function AssetDetail() {
             <div>
               <p><span className="text-gray-500">Manufacturer:</span> {props.manufacturer || 'N/A'}</p>
               <p><span className="text-gray-500">Model:</span> {props.model || 'N/A'}</p>
-              <p><span className="text-gray-500">Serial:</span> {asset.asset_serial || 'N/A'}</p>
+              <p><span className="text-gray-500">Serial:</span> {asset.asset_serial
+                ? <Link href={`/serials/${encodeURIComponent(asset.asset_serial)}`} className="text-blue-600 hover:underline font-mono">{asset.asset_serial}</Link>
+                : 'N/A'}</p>
             </div>
             <div>
               <p><span className="text-gray-500">Form Factor:</span> {props.form_factor || 'N/A'}</p>

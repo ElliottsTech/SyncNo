@@ -61,6 +61,16 @@ router.get('/:id', (req, res) => {
   const est = db.prepare('SELECT *, raw_json, synced FROM estimates WHERE id = ?').get(req.params.id);
   if (!est) return res.status(404).json({ error: 'Not found' });
 
+  // Resolve linked ticket + invoice numbers (raw record only stores IDs)
+  if (est.ticket_id) {
+    const t = db.prepare('SELECT number, subject, status FROM tickets WHERE id = ?').get(String(Number(est.ticket_id)));
+    if (t) est.ticket = t;
+  }
+  if (est.invoice_id) {
+    const inv = db.prepare('SELECT number FROM invoices WHERE id = ?').get(String(Number(est.invoice_id)));
+    if (inv) est.invoice = inv;
+  }
+
   // Parse + enrich line_items with product names from products table
   est.line_items = [];
   if (est.raw_json) {

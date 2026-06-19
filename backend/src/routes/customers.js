@@ -142,4 +142,18 @@ router.get('/:id/estimates', (req, res) => {
   res.json(estimates);
 });
 
+// GET /api/customers/:id/payments
+router.get('/:id/payments', (req, res) => {
+  const db = getDb();
+  const payments = db.prepare(`
+    SELECT id, ref_num, applied_at, payment_amount, payment_method, invoice_ids, success
+    FROM payments WHERE customer_id = ?
+    ORDER BY applied_at DESC
+  `).all(req.params.id);
+  res.json(payments.map(p => ({
+    ...p,
+    invoice_ids: p.invoice_ids ? (typeof p.invoice_ids === 'string' ? JSON.parse(p.invoice_ids) : p.invoice_ids) : [],
+  })));
+});
+
 export default router;

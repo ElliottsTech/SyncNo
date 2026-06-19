@@ -3,20 +3,40 @@ import { getDb } from '../db/database.js';
 
 const router = Router();
 
-// Enrich line_items parsed from raw_json with product names from products table.
-// Mutates each line item in-place, attaching `product_name` when product_id resolves.
+// Enrich line_items parsed from raw_json with product names + matched serial numbers.
+// Mutates each line item in-place:
+//   - `product_name` resolved from products table by product_id
+//   - `serial_number` resolved from product_serials by line_item.id (Syncro sets
+//     product_serial.line_item_id when a serial is sold on this line item)
 function enrichLineItems(lineItems) {
   if (!Array.isArray(lineItems) || lineItems.length === 0) return lineItems;
   const db = getDb();
   const ids = lineItems.map(li => li.product_id).filter(id => id != null && id !== '');
-  if (ids.length === 0) return lineItems;
-  const uniqIds = [...new Set(ids.map(String))];
-  const placeholders = uniqIds.map(() => '?').join(',');
-  const rows = db.prepare(`SELECT id, name FROM products WHERE id IN (${placeholders})`).all(...uniqIds);
-  const map = new Map(rows.map(r => [String(r.id), r.name]));
-  for (const li of lineItems) {
-    if (li.product_id != null && li.product_id !== '') {
-      li.product_name = map.get(String(li.product_id)) || li.product_name || null;
+  if (ids.length === 0) {
+    // Still try serial resolution below — product_id may be absent but line_item.id present
+  } else {
+    const uniqIds = [...new Set(ids.map(String))];
+    const placeholders = uniqIds.map(() => '?').join(',');
+    const rows = db.prepare(`SELECT id, name FROM products WHERE id IN (${placeholders})`).all(...uniqIds);
+    const map = new Map(rows.map(r => [String(r.id), r.name]));
+    for (const li of lineItems) {
+      if (li.product_id != null && li.product_id !== '') {
+        li.product_name = map.get(String(li.product_id)) || li.product_name || null;
+      }
+    }
+  }
+  const liIds = lineItems.map(li => li.id).filter(id => id != null);
+  if (liIds.length > 0) {
+    const uniq = [...new Set(liIds)];
+    const placeholders = uniq.map(() => '?').join(',');
+    const serials = db.prepare(
+      `SELECT line_item_id, serial_number FROM product_serials WHERE line_item_id IN (${placeholders})`
+    ).all(...uniq);
+    const serialMap = new Map(serials.map(r => [r.line_item_id, r.serial_number]));
+    for (const li of lineItems) {
+      if (li.id != null && serialMap.has(li.id)) {
+        li.serial_number = serialMap.get(li.id);
+      }
     }
   }
   return lineItems;
@@ -114,6 +134,21 @@ router.get('/:id', (req, res) => {
       }
     } catch (_) {}
   }
+
+  // Originating estimate (estimates.invoice_id points back here)
+  invoice.originating_estimate = db.prepare(`
+    SELECT id, number, status, total, date
+    FROM estimates WHERE invoice_id = ?
+    LIMIT 1
+  `).get(req.params.id) || null;
+
+  // Payments applied to this invoice
+  invoice.payments = db.prepare(`
+    SELECT id, ref_num, applied_at, payment_amount, payment_method, success
+    FROM payments
+    WHERE invoice_ids LIKE ? OR invoice_ids LIKE ? OR invoice_ids LIKE ?
+    ORDER BY applied_at DESC
+  `).all(`%"${req.params.id}"%`, `"${req.params.id}"%`, `%${req.params.id}%`);
 
   res.json(invoice);
 });

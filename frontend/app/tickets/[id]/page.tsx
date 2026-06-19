@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import Badge from '../../../components/Badge';
+import { usePageTitle } from '../../../lib/usePageTitle';
 import RawJsonView from '../../../components/RawJsonView';
 
 const API = '/api';
@@ -35,6 +36,7 @@ export default function TicketDetail() {
   const [timeEntries, setTimeEntries] = useState<any[]>([]);
   const [lineItems, setLineItems] = useState<any[]>([]);
   const [invoices, setInvoices] = useState<any[]>([]);
+  const [estimates, setEstimates] = useState<any[]>([]);
 
   useEffect(() => {
     fetch(`${API}/tickets/${id}`)
@@ -56,7 +58,13 @@ export default function TicketDetail() {
     fetch(`${API}/tickets/${id}/invoices`)
       .then(r => r.json())
       .then(setInvoices);
+
+    fetch(`${API}/tickets/${id}/estimates`)
+      .then(r => r.json())
+      .then(setEstimates);
   }, [id]);
+
+  usePageTitle(ticket ? `#${ticket.number} ${ticket.subject || ''} — Syncno` : null);
 
   if (!ticket) return <p className="text-gray-500">Loading...</p>;
 
@@ -163,6 +171,32 @@ export default function TicketDetail() {
           )}
         </CollapsibleSection>
 
+        <CollapsibleSection title="Estimates" count={estimates.length}>
+          {estimates.length > 0 ? (
+            <div className="space-y-2">
+              {estimates.map((est: any) => (
+                <Link
+                  key={est.id}
+                  href={`/estimates/${est.id}`}
+                  className="flex items-center justify-between gap-2 text-sm px-3 py-2 rounded border border-gray-200 hover:bg-gray-50"
+                >
+                  <span className="flex items-center gap-3">
+                    <span className="font-mono">#{est.number}</span>
+                    {est.status && <span className="text-xs text-gray-700 bg-gray-100 px-2 py-0.5 rounded">{est.status}</span>}
+                  </span>
+                  <span className="flex items-center gap-3">
+                    {est.date && <span className="text-gray-500">{new Date(est.date).toLocaleDateString()}</span>}
+                    <span className="font-medium">{est.total ? `$${est.total}` : ''}</span>
+                    {est.invoice_id && <span className="text-xs text-blue-700 bg-blue-100 px-2 py-0.5 rounded">INVOICED</span>}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          ) : (
+            <p className="text-gray-500 text-sm">No estimates linked to this ticket</p>
+          )}
+        </CollapsibleSection>
+
         <CollapsibleSection title="Time Entries" count={timeEntries.length}>
           {timeEntries.length > 0 ? (
             <div className="space-y-3">
@@ -192,6 +226,7 @@ export default function TicketDetail() {
               <thead>
                 <tr className="text-left text-gray-500 border-b">
                   <th className="pb-2">Product</th>
+                  <th className="pb-2">Serial</th>
                   <th className="pb-2">Description</th>
                   <th className="pb-2">Qty</th>
                   <th className="pb-2">Price</th>
@@ -207,6 +242,15 @@ export default function TicketDetail() {
                         </Link>
                       ) : (
                         <span className="text-gray-500">{li.product_name || 'N/A'}</span>
+                      )}
+                    </td>
+                    <td className="py-2">
+                      {li.serial_number ? (
+                        <Link href={`/serials/${encodeURIComponent(li.serial_number)}`} className="text-blue-600 hover:underline font-mono text-xs">
+                          {li.serial_number}
+                        </Link>
+                      ) : (
+                        <span className="text-gray-400">—</span>
                       )}
                     </td>
                     <td className="py-2">{li.description || 'N/A'}</td>

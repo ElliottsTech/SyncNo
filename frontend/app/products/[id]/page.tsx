@@ -5,6 +5,7 @@ import Link from 'next/link';
 import Badge from '../../../components/Badge';
 import DataTable from '../../../components/DataTable';
 import RawJsonView from '../../../components/RawJsonView';
+import { usePageTitle } from '../../../lib/usePageTitle';
 
 const API = '/api';
 
@@ -42,6 +43,8 @@ export default function ProductDetail() {
       .then(r => r.json())
       .then(setTickets);
   }, [id]);
+
+  usePageTitle(product ? `${product.name || 'Product'} — Syncno` : null);
 
   if (!product) return <p className="text-gray-500">Loading...</p>;
 
@@ -201,7 +204,8 @@ export default function ProductDetail() {
           {product.serials && product.serials.length > 0 ? (
             <DataTable
               columns={[
-                { key: 'serial_number', label: 'Serial Number' },
+                { key: 'serial_number', label: 'Serial Number', render: (v) => v ? <Link href={`/serials/${encodeURIComponent(v)}`} className="text-blue-600 hover:underline font-mono">{v}</Link> : '' },
+                { key: 'status', label: 'Status' },
                 { key: 'created_at', label: 'Created', render: v => v ? new Date(v).toLocaleDateString() : '' },
                 { key: 'updated_at', label: 'Updated', render: v => v ? new Date(v).toLocaleDateString() : '' },
               ]}
@@ -212,6 +216,27 @@ export default function ProductDetail() {
             <p className="text-gray-500 text-sm">
               {product.serialized ? 'No serials synced for this product.' : 'Product is not serialized.'}
             </p>
+          )}
+        </CollapsibleSection>
+
+        <CollapsibleSection title="SKUs" count={product.skus?.length || 0}>
+          {product.skus && product.skus.length > 0 ? (
+            <DataTable
+              columns={[
+                { key: 'sku', label: 'SKU' },
+                {
+                  key: 'vendor_name',
+                  label: 'Vendor',
+                  render: (v, row) => row.vendor_id
+                    ? <Link href={`/vendors/${row.vendor_id}`} className="text-blue-600 hover:underline">{v}</Link>
+                    : v,
+                },
+              ]}
+              data={product.skus}
+              emptyMessage="No SKUs"
+            />
+          ) : (
+            <p className="text-gray-500 text-sm">No SKUs registered for this product.</p>
           )}
         </CollapsibleSection>
       </div>

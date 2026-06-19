@@ -5,10 +5,12 @@ import DataTable from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
+import { usePageTitle } from '../../lib/usePageTitle';
 
 const API = '/api';
 
 export default function InvoicesPage() {
+  usePageTitle('Invoices — Syncno');
   const [invoices, setInvoices] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, limit: 50, total: 0 });
   const [loading, setLoading] = useState(true);

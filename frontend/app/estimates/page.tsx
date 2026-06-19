@@ -4,10 +4,12 @@ import Link from 'next/link';
 import DataTable from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
+import { usePageTitle } from '../../lib/usePageTitle';
 
 const API = '/api';
 
 export default function EstimatesPage() {
+  usePageTitle('Estimates — Syncno');
   const [estimates, setEstimates] = useState([]);
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, limit: 50, total: 0 });
