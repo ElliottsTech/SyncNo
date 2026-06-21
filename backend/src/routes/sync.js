@@ -5,6 +5,11 @@ import path from 'path';
 
 const router = Router();
 
+function requireAdmin(req, res, next) {
+  if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  next();
+}
+
 // Ensure new sync_state columns exist (migration for existing DBs)
 try {
   const db = getDb();
@@ -263,23 +268,20 @@ router.get('/status', (req, res) => {
   const lastSync = getSetting('last_sync');
   const azureClientId = process.env.AZURE_CLIENT_ID;
   const azureTenantId = process.env.AZURE_TENANT_ID;
-  const nextAuthUrl = process.env.NEXTAUTH_URL;
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+  // Return only configured flags + last sync timestamp. No secrets, partial or
+  // otherwise — the UI does not need them and exposing subdomain/tenant URLs
+  // hands an attacker free reconnaissance.
   res.json({
     syncro: {
       configured: !!(apiKey && subdomain),
-      subdomain: subdomain || null,
-      apiKeyMasked: apiKey ? '***' + apiKey.slice(-4) : null,
       lastSync: lastSync || null,
     },
     entra: {
       configured: !!(azureClientId && azureTenantId),
-      clientId: azureClientId ? '***' + azureClientId.slice(-8) : null,
-      tenantId: azureTenantId || null,
     },
     urls: {
-      nextAuth: nextAuthUrl || null,
-      api: apiUrl || null,
+      nextAuth: process.env.NEXTAUTH_URL || null,
+      api: process.env.NEXT_PUBLIC_API_URL || '/api',
     },
   });
 });
@@ -288,7 +290,7 @@ router.get('/status', (req, res) => {
 
 router.get('/last-results', (req, res) => {
   const db = getDb();
-  const entities = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials'];
+  const entities = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
   const results = {};
   for (const ent of entities) {
     const state = getSyncState(ent);
@@ -305,31 +307,10 @@ router.get('/last-results', (req, res) => {
 
 router.get('/progress', (req, res) => {
   const db = getDb();
-  const ticketState = getSyncState('tickets');
-  const customerState = getSyncState('customers');
-  const contactState = getSyncState('contacts');
-  const invoiceState = getSyncState('invoices');
-  const assetState = getSyncState('assets');
-  const estimateState = getSyncState('estimates');
-  const poState = getSyncState('purchase_orders');
-  const vendorState = getSyncState('vendors');
-  const productState = getSyncState('products');
-  const paymentState = getSyncState('payments');
-  const productSerialsState = getSyncState('product_serials');
-
-  res.json({
-    tickets: ticketState,
-    customers: customerState,
-    contacts: contactState,
-    invoices: invoiceState,
-    assets: assetState,
-    estimates: estimateState,
-    purchase_orders: poState,
-    vendors: vendorState,
-    products: productState,
-    payments: paymentState,
-    product_serials: productSerialsState,
-  });
+  const entities = ['tickets', 'customers', 'contacts', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
+  const out = {};
+  for (const ent of entities) out[ent] = getSyncState(ent);
+  res.json(out);
 });
 
 // ─── API: Sync events stream (polling fallback) ─────────────────────────────────
@@ -376,7 +357,7 @@ router.get('/events', (req, res) => {
 
 // ─── API: Save credentials ─────────────────────────────────────────────────────
 
-router.post('/save', (req, res) => {
+router.post('/save', requireAdmin, (req, res) => {
   const { apiKey, subdomain } = req.body;
   if (!apiKey || !subdomain) {
     return res.status(400).json({ error: 'apiKey and subdomain required' });
@@ -401,9 +382,44 @@ router.post('/save', (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/sync/save-azure — write Entra ID (Azure AD) app creds to
+// frontend/.env.local. AZURE_CLIENT_SECRET is sensitive — never returned by
+// /status. Path resolved relative to backend cwd → ../frontend/.env.local.
+router.post('/save-azure', requireAdmin, (req, res) => {
+  const { clientId, clientSecret, tenantId } = req.body;
+  if (!clientId || !tenantId) {
+    return res.status(400).json({ error: 'clientId and tenantId required' });
+  }
+  const envPath = path.resolve(process.cwd(), '..', 'frontend', '.env.local');
+  let content = '';
+  if (fs.existsSync(envPath)) {
+    content = fs.readFileSync(envPath, 'utf8');
+  }
+  const lines = content.split('\n');
+  const seen = new Set();
+  const updated = lines.map(line => {
+    if (line.startsWith('AZURE_CLIENT_ID=')) { seen.add('AZURE_CLIENT_ID'); return `AZURE_CLIENT_ID=${clientId}`; }
+    if (line.startsWith('AZURE_TENANT_ID=')) { seen.add('AZURE_TENANT_ID'); return `AZURE_TENANT_ID=${tenantId}`; }
+    if (line.startsWith('AZURE_CLIENT_SECRET=')) {
+      seen.add('AZURE_CLIENT_SECRET');
+      return clientSecret ? `AZURE_CLIENT_SECRET=${clientSecret}` : line;
+    }
+    return line;
+  }).filter(line => line.trim() !== '' || true);
+  if (!seen.has('AZURE_CLIENT_ID')) updated.push(`AZURE_CLIENT_ID=${clientId}`);
+  if (!seen.has('AZURE_TENANT_ID')) updated.push(`AZURE_TENANT_ID=${tenantId}`);
+  if (clientSecret && !seen.has('AZURE_CLIENT_SECRET')) updated.push(`AZURE_CLIENT_SECRET=${clientSecret}`);
+  try {
+    fs.writeFileSync(envPath, updated.join('\n') + '\n');
+  } catch (e) {
+    return res.status(500).json({ error: `Failed to write frontend/.env.local: ${e.message}` });
+  }
+  res.json({ success: true });
+});
+
 // ─── API: Preview ─────────────────────────────────────────────────────────────
 
-router.post('/preview', async (req, res) => {
+router.post('/preview', requireAdmin, async (req, res) => {
   const apiKey = getSetting('syncro_api_key');
   const subdomain = getSetting('syncro_subdomain');
 
@@ -467,9 +483,13 @@ router.post('/preview', async (req, res) => {
 
 // ─── API: Trigger ─────────────────────────────────────────────────────────────
 
-router.post('/trigger', async (req, res) => {
+router.post('/trigger', requireAdmin, async (req, res) => {
   const { entity } = req.body; // 'tickets', 'customers', etc. defaults to 'all'
   const forceAll = req.query.forceAll === 'true';
+  // Optional date range (YYYY-MM-DD). When set, overrides defaults for entities
+  // that accept date_from/date_to (currently appointments). Empty = defaults.
+  const dateFrom = req.body.date_from ? String(req.body.date_from).slice(0, 10) : null;
+  const dateTo = req.body.date_to ? String(req.body.date_to).slice(0, 10) : null;
 
   const apiKey = getSetting('syncro_api_key');
   const subdomain = getSetting('syncro_subdomain');
@@ -484,10 +504,14 @@ router.post('/trigger', async (req, res) => {
   rateLimitHits = 0;
 
   // Check if this entity is already running
-  const ALL_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials'];
-  const entitiesToRun = entity && entity !== 'all'
-    ? [entity]
-    : ALL_ENTITIES;
+  const ALL_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
+  const enabled = getEnabledEntities();
+  const entitiesToRun = (entity && entity !== 'all' ? [entity] : ALL_ENTITIES)
+    .filter(e => enabled.includes(e));
+
+  if (entitiesToRun.length === 0) {
+    return res.status(400).json({ error: 'No enabled entities to sync' });
+  }
 
   for (const ent of entitiesToRun) {
     const state = getSyncState(ent);
@@ -518,7 +542,7 @@ router.post('/trigger', async (req, res) => {
     } catch (_) {}
   };
 
-  log('SYNC_START', `Sync triggered for: ${entitiesToRun.join(', ')}, forceAll: ${forceAll}`);
+  log('SYNC_START', `Sync triggered for: ${entitiesToRun.join(', ')}, forceAll: ${forceAll}${dateFrom || dateTo ? `, range: ${dateFrom || '…'}→${dateTo || '…'}` : ''}`);
 
   // Send 202 acknowledgment as SSE event (stream stays open for subsequent events)
   res.write(`data: ${JSON.stringify({ accepted: true, entities: entitiesToRun })}\n\n`);
@@ -526,7 +550,7 @@ router.post('/trigger', async (req, res) => {
   // Run sync in next tick (non-blocking)
   setImmediate(() => {
     try {
-      Promise.resolve(runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId))
+      Promise.resolve(runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, { dateFrom, dateTo }))
         .catch(err => console.error('runSync unhandled:', err.message));
     } catch (err) {
       console.error('runSync threw synchronously:', err.message);
@@ -538,7 +562,7 @@ router.post('/trigger', async (req, res) => {
 
 let rateLimitHits = 0;
 
-async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) {
+async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, options = {}) {
   const db = getDb();
   const results = {};
   const startTime = Date.now();
@@ -690,6 +714,57 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
   }
 
   // ─── Ticket sync ─────────────────────────────────────────────────────────────
+
+  // Pull ticket attachments from Syncro to local disk.
+  // Syncro embeds the attachment list (with ephemeral S3 download URLs) inside
+  // the ticket detail payload as `detail.attachments`. We read from there — no
+  // separate API call. Each item: { id, file_name, file: { url, thumb, main },
+  // content_type, file_size, ... }. URLs are presigned with 7-day expiry, so we
+  // download immediately and serve from local disk.
+  const ATTACHMENTS_DIR = path.resolve(process.cwd(), 'data/attachments');
+
+  function sanitizeFilename(name) {
+    if (!name) return 'unnamed';
+    const base = String(name).replace(/[\\/]/g, '_').replace(/\.\.+/g, '.').trim();
+    const cleaned = base.replace(/[^A-Za-z0-9._\-\s]/g, '_').slice(0, 200);
+    return cleaned || 'unnamed';
+  }
+
+  async function syncTicketAttachments(detail) {
+    const ticketNumber = String(detail.number || detail.id);
+    const ticketDir = path.join(ATTACHMENTS_DIR, ticketNumber);
+    const attachments = Array.isArray(detail.attachments) ? detail.attachments : [];
+
+    if (attachments.length === 0) {
+      db.prepare('UPDATE tickets SET attachments_count = 0, attachments_synced_at = datetime(\'now\') WHERE id = ?').run(detail.id);
+      return;
+    }
+
+    try { fs.mkdirSync(ticketDir, { recursive: true }); } catch (_) {}
+
+    let saved = 0;
+    for (const att of attachments) {
+      checkAbort();
+      const safeName = sanitizeFilename(att.file_name || att.name || `attachment_${att.id}`);
+      const dest = path.join(ticketDir, safeName);
+      // Skip if already on disk — cheap idempotency for resume / re-runs.
+      if (fs.existsSync(dest)) { saved++; continue; }
+      const url = att.file?.url || att.url;
+      if (!url) continue;
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`download ${resp.status}`);
+        const buf = Buffer.from(await resp.arrayBuffer());
+        fs.writeFileSync(dest, buf);
+        saved++;
+      } catch (e) {
+        results.errors = results.errors || [];
+        results.errors.push(`attachments/${detail.id}/${safeName}: ${e.message}`);
+      }
+    }
+
+    db.prepare('UPDATE tickets SET attachments_count = ?, attachments_synced_at = datetime(\'now\') WHERE id = ?').run(saved, detail.id);
+  }
 
   async function syncTickets() {
     const state = getSyncState('tickets');
@@ -1019,6 +1094,12 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
         for (const li of lineItems) {
           db.prepare(`INSERT OR REPLACE INTO ticket_line_items (id, ticket_id, product_id, quantity, price, description, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
             .run(li.id, detail.id, li.product_id || '', parseFloat(li.quantity) || 0, parseFloat(li.retail_cents) / 100 || parseFloat(li.price) || 0, li.description || li.name || '', li.created_at || '', li.updated_at || '', JSON.stringify(li));
+        }
+
+        // Sync attachments — see syncTicketAttachments above.
+        try { await syncTicketAttachments(detail); } catch (e) {
+          results.errors = results.errors || [];
+          results.errors.push(`attachments/${detail.id}: ${e.message}`);
         }
 
         state.detail_cursor = String(detail.id);
@@ -2244,6 +2325,449 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
     log('SYNC_ENTITY', `Product SKUs: iterated ${all.length} products, ${totalSkus} SKUs upserted`);
   }
 
+  // ─── Generic entity sync helper ─────────────────────────────────────────────
+  // Used by the new simple entities (appointments, contracts, leads, etc.).
+  // These entities follow the same shape as /vendors — list endpoint returns
+  // full records, no detail call needed.
+
+  async function syncGenericEntity({
+    entity, endpoint, arrayField, columns, columnCount, insertSql, mapRow,
+    lastSyncKey = null, nameField = 'name', idField = 'id',
+    perPage = 100, extraParams = '',
+    // Some Syncro endpoints (appointments) return no meta.total_pages and ignore per_page.
+    // paginateUntilEmpty: keep fetching pages until a page returns 0 records or all-dup IDs.
+    paginateUntilEmpty = false,
+  }) {
+    emitEvent({ phase: entity, status: 'started' }, res);
+    const localMax = forceAll ? null : (lastSyncKey ? getSetting(lastSyncKey) : (getSetting('last_sync') || null));
+    const state = getSyncState(entity);
+    const resumeOffset = forceAll ? 0 : (state.detail_item_index || 0);
+    let absoluteIndex = 0;
+    let latestUpdatedAt = localMax;
+    let inserts = 0;
+
+    const qs = (extraParams ? extraParams + '&' : '') + `per_page=${perPage}`;
+    const pageUrl = (p) => `${baseUrl}/${endpoint}?page=${p}&${qs}`;
+
+    try {
+      const page1 = await fetchJson(pageUrl(1), entity);
+      // For paginateUntilEmpty, we don't know total up front — estimate from page 1 size.
+      const totalPagesHint = page1.meta?.total_pages || 1;
+      const total = paginateUntilEmpty
+        ? page1[arrayField]?.length || 0
+        : await computeTotalRecords(page1, endpoint, arrayField);
+
+      state.phase = 'detail';
+      state.detail_total = total;
+      state.detail_synced = 0;
+      if (forceAll) {
+        state.detail_page = 1;
+        state.detail_item_index = 0;
+      }
+      saveSyncState(state);
+
+      let page = 1;
+      let seenIds = new Set();
+      let consecutiveDupPages = 0;
+      let firstPageSize = 0;
+      while (true) {
+        const data = page === 1 ? page1 : await fetchJson(pageUrl(page), entity);
+        checkAbort();
+        const records = data[arrayField] || [];
+        if (page === 1) firstPageSize = records.length;
+
+        if (records.length === 0) break; // empty page = done
+
+        // Detect all-dup page (API returning same page on increment) — break to avoid infinite loop.
+        let newIdsOnPage = 0;
+        for (const r of records) {
+          if (!seenIds.has(r[idField])) { seenIds.add(r[idField]); newIdsOnPage++; }
+        }
+        if (page > 1 && newIdsOnPage === 0) {
+          consecutiveDupPages++;
+          if (consecutiveDupPages >= 1) break;
+        } else {
+          consecutiveDupPages = 0;
+        }
+
+        for (const r of records) {
+          absoluteIndex++;
+          checkAbort();
+          if (absoluteIndex <= resumeOffset) continue;
+
+          const existing = db.prepare(`SELECT id FROM ${entity} WHERE id = ?`).get(r[idField]);
+          const updated = r.updated_at || r.modified;
+          const shouldSync = forceAll || !existing || !localMax || !updated || updated > localMax;
+
+          if (shouldSync) {
+            try {
+              db.prepare(insertSql).run(...mapRow(r), JSON.stringify(r));
+              if (!existing) inserts++;
+              if (updated && updated > (latestUpdatedAt || '')) latestUpdatedAt = updated;
+            } catch (insertErr) {
+              if (syncSignal.aborted) throw new Error('Sync cancelled');
+              results.errors = results.errors || [];
+              results.errors.push(`${entity}/${r[idField]}: ${insertErr.message}`);
+            }
+          }
+
+          state.detail_page = page;
+          state.detail_item_index = absoluteIndex;
+          state.detail_total = absoluteIndex;  // grows as we discover more
+          saveSyncState(state);
+          emitEvent({
+            phase: entity, status: 'progress',
+            current: absoluteIndex, total: Math.max(total, absoluteIndex),
+            currentRecordId: r[idField],
+            currentRecordName: r[nameField] || r.email || r.summary || '',
+          }, res);
+          await new Promise((resolve, reject) => {
+            const t = setTimeout(resolve, 350);
+            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
+          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+        }
+
+        if (paginateUntilEmpty) {
+          // Syncro often ignores per_page and returns a fixed page size (e.g. 50).
+          // Stop only when a page is shorter than the first page (true last page) or empty.
+          if (firstPageSize > 0 && records.length < firstPageSize) break;
+          page++;
+          if (page > 5000) break; // safety
+        } else {
+          if (page >= totalPagesHint && !(data.meta?.total_pages > totalPagesHint)) break;
+          if (data.meta?.total_pages > totalPagesHint) {
+            // extended — keep going
+          }
+          page++;
+          if (page > 1000) break; // safety
+        }
+      }
+
+      if (latestUpdatedAt && lastSyncKey) setSetting(lastSyncKey, latestUpdatedAt);
+      results[entity] = absoluteIndex;
+      results[`${entity}Inserted`] = inserts;
+      state.phase = 'idle';
+      state.detail_page = 1;
+      state.detail_item_index = 0;
+      state.last_result_count = inserts;
+      state.last_result_error = null;
+      saveSyncState(state);
+      log('SYNC_ENTITY', `${entity}: ${absoluteIndex} iterated, ${inserts} inserted`);
+      emitEvent({ phase: entity, status: 'done', count: inserts }, res);
+      clearEventsForEntity(entity);
+    } catch (e) {
+      state.phase = 'error';
+      state.last_result_error = e.message;
+      saveSyncState(state);
+      results.errors = results.errors || [];
+      results.errors.push(`${entity}: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent({ phase: entity, status: 'error', error: e.message }, res);
+    }
+  }
+
+  async function syncAppointments(overrideFrom = null, overrideTo = null) {
+    // Fold appointment_types refresh in here — it's a tiny lookup table (single page),
+    // no value in a separate sync job.
+    try {
+      const atData = await fetchJson(`${baseUrl}/appointment_types?page=1&per_page=100`, 'appointment_types');
+      const types = atData.appointment_types || [];
+      let typeInserts = 0;
+      for (const t of types) {
+        try {
+          db.prepare(`INSERT OR REPLACE INTO appointment_types
+            (id, name, created_at, updated_at, raw_json, synced)
+            VALUES (?, ?, ?, ?, ?, 1)`).run(
+            t.id, t.name || '', t.created_at || '', t.updated_at || '', JSON.stringify(t)
+          );
+          typeInserts++;
+        } catch (e) {
+          results.errors = results.errors || [];
+          results.errors.push(`appointment_types/${t.id}: ${e.message}`);
+        }
+      }
+      results.appointment_types = types.length;
+      results.appointment_typesInserted = typeInserts;
+      emitEvent({ phase: 'appointments', status: 'progress', message: `appointment_types: ${typeInserts} synced` }, res);
+    } catch (e) {
+      results.errors = results.errors || [];
+      results.errors.push(`appointment_types: ${e.message}`);
+    }
+
+    // Syncro /appointments: no meta.total_pages, returns ~50/page regardless of per_page,
+    // and defaults to upcoming/recent only. Pass date_from + date_to to cover a
+    // bounded window and paginate until empty. Defaults = 10y back / 2y forward.
+    // Caller can override per-sync via the date picker on the sync UI.
+    const year = new Date().getFullYear();
+    const dateFrom = overrideFrom || `${year - 10}-01-01`;
+    const dateTo = overrideTo || `${year + 2}-12-31`;
+    return syncGenericEntity({
+      entity: 'appointments',
+      endpoint: 'appointments',
+      arrayField: 'appointments',
+      nameField: 'summary',
+      perPage: 100,
+      extraParams: `date_from=${dateFrom}&date_to=${dateTo}`,
+      lastSyncKey: 'last_sync_appointments',
+      paginateUntilEmpty: true,
+      insertSql: `INSERT OR REPLACE INTO appointments
+        (id, summary, description, customer_id, ticket_id, start_at, end_at, duration, location,
+         appointment_location_type, start_at_label, all_day, do_not_email, created_at, updated_at, raw_json, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      mapRow: r => [
+        r.id, r.summary || '', r.description || '',
+        r.customer_id || null, r.ticket_id || null,
+        r.start_at || '', r.end_at || '', r.duration || null,
+        r.location || '', r.appointment_location_type || '',
+        r.start_at_label || '', r.all_day ? 1 : 0, r.do_not_email ? 1 : 0,
+        r.created_at || '', r.updated_at || '',
+      ],
+    });
+  }
+
+  async function syncAppointmentTypes() {
+    // Deprecated — folded into syncAppointments. Kept as no-op for back-compat with
+    // any in-flight dispatch.
+    return;
+  }
+
+  async function syncContracts() {
+    return syncGenericEntity({
+      entity: 'contracts',
+      endpoint: 'contracts',
+      arrayField: 'contracts',
+      insertSql: `INSERT OR REPLACE INTO contracts
+        (id, account_id, customer_id, name, contract_amount, start_date, end_date,
+         description, status, likelihood, apply_to_all, primary_contact, sla_id,
+         created_at, updated_at, raw_json, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      mapRow: r => [
+        r.id, r.account_id || '', r.customer_id || null, r.name || '',
+        r.contract_amount || '', r.start_date || '', r.end_date || '',
+        r.description || '', r.status || '', r.likelihood || '',
+        r.apply_to_all ? 1 : 0, r.primary_contact ? JSON.stringify(r.primary_contact) : '',
+        r.sla_id || '', r.created_at || '', r.updated_at || '',
+      ],
+    });
+  }
+
+  async function syncLeads() {
+    return syncGenericEntity({
+      entity: 'leads',
+      endpoint: 'leads',
+      arrayField: 'leads',
+      // Pull every status Syncro will filter on; otherwise default list omits
+      // active pipeline statuses and we miss rows.
+      extraParams: 'status_list=' + encodeURIComponent(
+        ['New', 'Lead', 'First Contact', 'Opportunity', 'Prospect',
+         'Waiting on Client', 'In Negotiation', 'Pending', 'Won', 'Lost'].join(',')
+      ),
+      insertSql: `INSERT OR REPLACE INTO leads
+        (id, name, first_name, last_name, email, phone, mobile, address, city, state, zip,
+         status, customer_id, contact_id, description,
+         ticket_id, ticket_subject, ticket_description, ticket_problem_type,
+         mailbox_id, mailbox_name, business_then_name, has_attachments, message_read,
+         user_id, location_id, created_at, updated_at, raw_json, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      mapRow: r => {
+        const name = [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || r.name || r.business_then_name || '';
+        return [
+          r.id, name,
+          r.first_name || '', r.last_name || '',
+          r.email || '', r.phone || '', r.mobile || '',
+          r.address || '', r.city || '', r.state || '', r.zip || '',
+          r.status || '',
+          r.customer_id || null, r.contact_id || null, r.description || '',
+          r.ticket_id || null, r.ticket_subject || '', r.ticket_description || '', r.ticket_problem_type || '',
+          r.mailbox_id || null, r.mailbox_name || '', r.business_then_name || '',
+          r.has_attachments ? 1 : 0, r.message_read ? 1 : 0,
+          r.user_id != null ? String(r.user_id) : null, r.location_id != null ? String(r.location_id) : null,
+          r.created_at || '', r.updated_at || '',
+        ];
+      },
+    });
+  }
+
+  async function syncPolicyFolders() {
+    return syncGenericEntity({
+      entity: 'policy_folders',
+      endpoint: 'policy_folders',
+      arrayField: 'policy_folders',
+      insertSql: `INSERT OR REPLACE INTO policy_folders
+        (id, name, customer_id, asset_id, description, created_at, updated_at, raw_json, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      mapRow: r => [
+        r.id, r.name || '', r.customer_id || null, r.asset_id || null,
+        r.description || '', r.created_at || '', r.updated_at || '',
+      ],
+    });
+  }
+
+  async function syncPortalUsers() {
+    return syncGenericEntity({
+      entity: 'portal_users',
+      endpoint: 'portal_users',
+      arrayField: 'portal_users',
+      nameField: 'email',
+      insertSql: `INSERT OR REPLACE INTO portal_users
+        (id, account_id, portal_group_id, email, disabled, customer_id, contact_id,
+         mobile, confirmed_mobile, require_mfa, created_at, updated_at, raw_json, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      mapRow: r => [
+        r.id, r.account_id || '', r.portal_group_id || '', r.email || '',
+        r.disabled ? 1 : 0, r.customer_id || null, r.contact_id || null,
+        r.mobile || '', r.confirmed_mobile || '', r.require_mfa ? 1 : 0,
+        r.created_at || '', r.updated_at || '',
+      ],
+    });
+  }
+
+  async function syncSchedules() {
+    return syncGenericEntity({
+      entity: 'schedules',
+      endpoint: 'schedules',
+      arrayField: 'schedules',
+      insertSql: `INSERT OR REPLACE INTO schedules
+        (id, invoice_id, customer_id, name, status, amount, next_date, start_date, end_date,
+         frequency, created_at, updated_at, raw_json, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      mapRow: r => [
+        r.id, r.invoice_id || null, r.customer_id || null, r.name || '',
+        r.paused ? 'paused' : 'active',
+        r.amount != null ? r.amount : (r.subtotal != null ? r.subtotal : ''),
+        r.next_date || r.next_run || '',
+        r.start_date || '', r.end_date || '',
+        r.frequency || '',
+        r.created_at || '', r.updated_at || '',
+      ],
+    });
+  }
+
+  async function syncSyncroUsers() {
+    return syncGenericEntity({
+      entity: 'syncro_users',
+      endpoint: 'users',
+      arrayField: 'users',
+      nameField: 'name',
+      insertSql: `INSERT OR REPLACE INTO syncro_users
+        (id, account_id, email, name, first_name, last_name, disabled, type, created_at, updated_at, raw_json, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      mapRow: r => {
+        // Syncro /users endpoint returns [[id, name], ...] tuples, not user objects.
+        // Fall back to object-shape props if API ever changes.
+        if (Array.isArray(r)) {
+          return [
+            r[0], '', '', r[1] || '',
+            '', '', 0, '', '', '',
+          ];
+        }
+        return [
+          r.id, r.account_id || '', r.email || '', r.name || '',
+          r.first_name || '', r.last_name || '', r.disabled ? 1 : 0,
+          r.type || '', r.created_at || '', r.updated_at || '',
+        ];
+      },
+    });
+  }
+
+  async function syncWikiPages() {
+    return syncGenericEntity({
+      entity: 'wiki_pages',
+      endpoint: 'wiki_pages',
+      arrayField: 'wiki_pages',
+      insertSql: `INSERT OR REPLACE INTO wiki_pages
+        (id, account_id, name, slug, body, interpolated_body, parent_id, modified, created_at, updated_at, raw_json, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      mapRow: r => [
+        r.id, r.account_id || '', r.name || '', r.slug || '',
+        r.body || '', r.interpolated_body || '', r.parent_id || null,
+        r.modified || '', r.created_at || '', r.updated_at || '',
+      ],
+    });
+  }
+
+  // Worksheet results are children of tickets — iterate all tickets, fetch each
+  // ticket's worksheet_results endpoint, store rows.
+  async function syncWorksheetResults() {
+    emitEvent({ phase: 'worksheet_results', status: 'started' }, res);
+    const state = getSyncState('worksheet_results');
+    const resumeOffset = forceAll ? 0 : (state.detail_item_index || 0);
+    let absoluteIndex = 0;
+    let inserts = 0;
+    try {
+      const tickets = db.prepare('SELECT id, number FROM tickets ORDER BY id').all();
+      state.phase = 'detail';
+      state.detail_total = tickets.length;
+      state.detail_synced = 0;
+      if (forceAll) { state.detail_page = 1; state.detail_item_index = 0; }
+      saveSyncState(state);
+
+      for (const t of tickets) {
+        absoluteIndex++;
+        checkAbort();
+        if (absoluteIndex <= resumeOffset) continue;
+
+        try {
+          const data = await fetchJson(`${baseUrl}/tickets/${t.id}/worksheet_results?page=1&per_page=100`, 'worksheet_results');
+          const rows = data.worksheet_results || data.worksheets || [];
+          for (const r of rows) {
+            try {
+              db.prepare(`INSERT OR REPLACE INTO worksheet_results
+                (id, ticket_id, name, body, result, created_at, updated_at, raw_json, synced)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`).run(
+                r.id, t.id, r.name || '', r.body || '', r.result || '',
+                r.created_at || '', r.updated_at || '', JSON.stringify(r)
+              );
+              inserts++;
+            } catch (insertErr) {
+              if (syncSignal.aborted) throw new Error('Sync cancelled');
+              results.errors = results.errors || [];
+              results.errors.push(`worksheet_results/${r.id}: ${insertErr.message}`);
+            }
+          }
+        } catch (fetchErr) {
+          // Some tickets 404 or 401 on this endpoint — record + continue
+          results.errors = results.errors || [];
+          results.errors.push(`worksheet_results/ticket ${t.id}: ${fetchErr.message}`);
+        }
+
+        state.detail_page = Math.ceil(absoluteIndex / 100);
+        state.detail_item_index = absoluteIndex;
+        state.detail_synced = inserts;
+        saveSyncState(state);
+        emitEvent({
+          phase: 'worksheet_results', status: 'progress',
+          current: absoluteIndex, total: tickets.length,
+          current_ticket_id: t.id, current_ticket_number: t.number,
+        }, res);
+        await new Promise((resolve, reject) => {
+          const t2 = setTimeout(resolve, 350);
+          syncSignal.addEventListener('abort', () => { clearTimeout(t2); reject(syncSignal.reason); }, { once: true });
+        }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+      }
+
+      results.worksheet_results = absoluteIndex;
+      results.worksheet_resultsInserted = inserts;
+      state.phase = 'idle';
+      state.detail_page = 1;
+      state.detail_item_index = 0;
+      state.last_result_count = inserts;
+      state.last_result_error = null;
+      saveSyncState(state);
+      log('SYNC_ENTITY', `worksheet_results: ${absoluteIndex} tickets iterated, ${inserts} rows inserted`);
+      emitEvent({ phase: 'worksheet_results', status: 'done', count: inserts }, res);
+      clearEventsForEntity('worksheet_results');
+    } catch (e) {
+      state.phase = 'error';
+      state.last_result_error = e.message;
+      saveSyncState(state);
+      results.errors = results.errors || [];
+      results.errors.push(`worksheet_results: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent({ phase: 'worksheet_results', status: 'error', error: e.message }, res);
+    }
+  }
+
   // ─── Run all entity syncs ───────────────────────────────────────────────────
 
   try {
@@ -2259,6 +2783,16 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
       else if (ent === 'products') await syncProducts();
       else if (ent === 'payments') await syncPayments();
       else if (ent === 'product_serials') await syncProductSerials();
+      else if (ent === 'appointments') await syncAppointments(options.dateFrom, options.dateTo);
+      else if (ent === 'appointment_types') await syncAppointmentTypes(); // no-op — folded into syncAppointments
+      else if (ent === 'contracts') await syncContracts();
+      else if (ent === 'leads') await syncLeads();
+      else if (ent === 'policy_folders') await syncPolicyFolders();
+      else if (ent === 'portal_users') await syncPortalUsers();
+      else if (ent === 'schedules') await syncSchedules();
+      else if (ent === 'syncro_users') await syncSyncroUsers();
+      else if (ent === 'wiki_pages') await syncWikiPages();
+      else if (ent === 'worksheet_results') await syncWorksheetResults();
     }
 
     results.duration = Date.now() - startTime;
@@ -2281,7 +2815,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId) 
 
 // ─── API: Cancel sync ─────────────────────────────────────────────────────────
 
-router.delete('/trigger', (req, res) => {
+router.delete('/trigger', requireAdmin, (req, res) => {
   // Optional ?entity=X scopes the cancel to one running sync.
   // Without it, cancels everything (backward compat).
   const targetEntity = req.query.entity || (req.body && req.body.entity) || null;
@@ -2299,7 +2833,7 @@ router.delete('/trigger', (req, res) => {
   // Reset DB state for affected entities only (preserves cursor for resume)
   const entities = targetEntity && targetEntity !== 'all'
     ? [targetEntity]
-    : ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
+    : ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
   for (const ent of entities) {
     const state = getSyncState(ent);
     if (state.phase !== 'idle' && state.phase !== 'error') {
@@ -2317,9 +2851,9 @@ router.delete('/trigger', (req, res) => {
 
 // ─── API: Reset sync state ───────────────────────────────────────────────────
 
-router.post('/reset', (req, res) => {
+router.post('/reset', requireAdmin, (req, res) => {
   const { entity } = req.body;
-  const entities = entity ? [entity] : ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products'];
+  const entities = entity ? [entity] : ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
   for (const ent of entities) {
     const state = getSyncState(ent);
     state.phase = 'idle';
@@ -2332,9 +2866,9 @@ router.post('/reset', (req, res) => {
 
 // ─── API: Toggle synced flag ──────────────────────────────────────────────────
 
-router.patch('/synced', (req, res) => {
+router.patch('/synced', requireAdmin, (req, res) => {
   const { table, id, synced } = req.body;
-  const allowedTables = ['customers', 'contacts', 'tickets', 'assets', 'invoices', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments'];
+  const allowedTables = ['customers', 'contacts', 'tickets', 'assets', 'invoices', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'appointments', 'appointment_types', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
   if (!table || !id || typeof synced !== 'boolean') {
     return res.status(400).json({ error: 'table, id, and synced required' });
   }
@@ -2355,7 +2889,7 @@ router.patch('/synced', (req, res) => {
 
 // ─── Daily scheduler ─────────────────────────────────────────────────────────
 
-const SCHEDULABLE_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials'];
+const SCHEDULABLE_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
 // Default staggered times — 15min apart starting 02:00
 const DEFAULT_SCHEDULE_TIMES = {
   customers: '02:00',
@@ -2369,6 +2903,15 @@ const DEFAULT_SCHEDULE_TIMES = {
   products: '04:00',
   payments: '04:15',
   product_serials: '05:00',
+  appointments: '05:15',
+  contracts: '05:45',
+  leads: '06:00',
+  policy_folders: '06:15',
+  portal_users: '06:30',
+  schedules: '06:45',
+  syncro_users: '07:00',
+  wiki_pages: '07:15',
+  worksheet_results: '07:30',
 };
 const SCHEDULE_LAST_FIRES_TABLE = 'schedule_last_fired';
 
@@ -2394,7 +2937,9 @@ function getSchedule() {
   const schedule = {};
   const lastFiredRows = db.prepare(`SELECT entity, last_fired_date FROM ${SCHEDULE_LAST_FIRES_TABLE}`).all();
   const lastFiredMap = Object.fromEntries(lastFiredRows.map(r => [r.entity, r.last_fired_date]));
+  const enabledEntities = getEnabledEntities();
   for (const ent of SCHEDULABLE_ENTITIES) {
+    if (!enabledEntities.includes(ent)) continue;
     const raw = getSetting(`schedule_${ent}`);
     const time = raw === null || raw === undefined || raw === '' ? '' : raw;
     schedule[ent] = {
@@ -2452,7 +2997,9 @@ function checkSchedule() {
     const hhmm = `${hh}:${mm}`;
     const today = now.toISOString().slice(0, 10);
     const schedule = getSchedule();
+    const enabledEntities = getEnabledEntities();
     for (const ent of SCHEDULABLE_ENTITIES) {
+      if (!enabledEntities.includes(ent)) continue;
       const cfg = schedule[ent];
       if (!cfg.enabled) continue;
       if (cfg.time !== hhmm) continue;
@@ -2475,7 +3022,7 @@ router.get('/schedule', (req, res) => {
   res.json({ schedule: getSchedule() });
 });
 
-router.post('/schedule', (req, res) => {
+router.post('/schedule', requireAdmin, (req, res) => {
   const { schedule } = req.body || {};
   if (!schedule || typeof schedule !== 'object') {
     return res.status(400).json({ error: 'schedule object required' });
@@ -2495,6 +3042,50 @@ router.post('/schedule', (req, res) => {
     }
   }
   res.json({ ok: true, schedule: getSchedule() });
+});
+
+// ─── Tab/entity enablement ──────────────────────────────────────────────────
+// Single source of truth for which entities appear in sidebar, sync UI, scheduler.
+// Stored as JSON array in settings key `enabled_entities`. Default: all enabled.
+
+const MASTER_ENTITIES = [
+  'customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates',
+  'purchase_orders', 'vendors', 'products', 'payments', 'product_serials',
+  'appointments', 'contracts', 'leads', 'policy_folders',
+  'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results',
+];
+
+function getEnabledEntities() {
+  const raw = getSetting('enabled_entities');
+  if (!raw) return MASTER_ENTITIES.slice();
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr) || arr.length === 0) return MASTER_ENTITIES.slice();
+    return arr.filter(e => MASTER_ENTITIES.includes(e));
+  } catch (_) {
+    return MASTER_ENTITIES.slice();
+  }
+}
+
+function isEnabled(entity) {
+  return getEnabledEntities().includes(entity);
+}
+
+router.get('/enabled', (req, res) => {
+  res.json({
+    entities: getEnabledEntities(),
+    available: MASTER_ENTITIES,
+  });
+});
+
+router.post('/enabled', requireAdmin, (req, res) => {
+  const { entities } = req.body || {};
+  if (!Array.isArray(entities)) {
+    return res.status(400).json({ error: 'entities array required' });
+  }
+  const valid = entities.filter(e => MASTER_ENTITIES.includes(e));
+  setSetting('enabled_entities', JSON.stringify(valid));
+  res.json({ ok: true, entities: valid, available: MASTER_ENTITIES });
 });
 
 export default router;

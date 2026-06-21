@@ -108,31 +108,64 @@ router.get('/:id', (req, res) => {
     `).get(product.product_category, product.product_category);
   }
 
-  // Usage stats: how many tickets / invoices / estimates reference this product
-  const ticketCount = db.prepare('SELECT COUNT(*) as cnt FROM ticket_line_items WHERE product_id = ?').get(req.params.id)?.cnt || 0;
-  const invoiceCount = db.prepare(`
-    SELECT COUNT(*) as cnt FROM invoices
-    WHERE raw_json LIKE ?
-  `).get(`%"product_id":${req.params.id}%`)?.cnt || 0;
-  const estimateCount = db.prepare(`
-    SELECT COUNT(*) as cnt FROM estimates
-    WHERE raw_json LIKE ?
-  `).get(`%"product_id":${req.params.id}%`)?.cnt || 0;
-  const poCount = db.prepare(`
-    SELECT COUNT(*) as cnt FROM purchase_orders
-    WHERE raw_json LIKE ?
-  `).get(`%"product_id":${req.params.id}%`)?.cnt || 0;
+  // Usage stats + linked records: tickets via line_items table, others via
+  // raw_json LIKE (no invoice/estimate/PO line_items tables exist — line items
+  // live inside the parent's raw_json only).
+  const pid = req.params.id;
+  const likePat = `%"product_id":${pid}%`;
+
+  const linkedTickets = db.prepare(`
+    SELECT DISTINCT t.id, t.number, t.subject, t.status, t.customer_id, t.customer_business_then_name
+    FROM ticket_line_items tli
+    JOIN tickets t ON t.id = tli.ticket_id
+    WHERE tli.product_id = ?
+    ORDER BY t.created_at DESC
+  `).all(pid);
+
+  const linkedInvoices = db.prepare(`
+    SELECT id, number, customer_id, customer_business_then_name, date, due_date, total, is_paid, verified_paid
+    FROM invoices WHERE raw_json LIKE ?
+    ORDER BY date DESC
+  `).all(likePat);
+
+  const linkedEstimates = db.prepare(`
+    SELECT id, number, status, customer_id, customer_business_then_name, date, total
+    FROM estimates WHERE raw_json LIKE ?
+    ORDER BY date DESC
+  `).all(likePat);
+
+  const linkedPOs = db.prepare(`
+    SELECT id, number, status, total, created_at, due_date, vendor_id, vendor
+    FROM purchase_orders WHERE raw_json LIKE ?
+    ORDER BY created_at DESC
+  `).all(likePat);
+
+  // Normalize PO vendor JSON → vendor_name
+  const linkedPurchaseOrders = linkedPOs.map(po => {
+    let vendor_name = null;
+    if (po.vendor && typeof po.vendor === 'string') {
+      try { vendor_name = JSON.parse(po.vendor).name || null; } catch (_) {}
+    }
+    delete po.vendor;
+    return { ...po, vendor_name };
+  });
 
   res.json({
     ...product,
     serials,
     skus,
     category,
+    linked: {
+      tickets: linkedTickets,
+      invoices: linkedInvoices,
+      estimates: linkedEstimates,
+      purchase_orders: linkedPurchaseOrders,
+    },
     usage: {
-      tickets: ticketCount,
-      invoices: invoiceCount,
-      estimates: estimateCount,
-      purchase_orders: poCount,
+      tickets: linkedTickets.length,
+      invoices: linkedInvoices.length,
+      estimates: linkedEstimates.length,
+      purchase_orders: linkedPurchaseOrders.length,
     },
   });
 });

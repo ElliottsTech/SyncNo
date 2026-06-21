@@ -93,7 +93,9 @@ CREATE TABLE IF NOT EXISTS tickets (
   synced INTEGER DEFAULT 0,
   has_detail INTEGER DEFAULT 0,
   synced_at TEXT,
-  deleted_at TEXT DEFAULT NULL
+  deleted_at TEXT DEFAULT NULL,
+  attachments_count INTEGER DEFAULT 0,
+  attachments_synced_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS assets (
@@ -426,3 +428,190 @@ CREATE TABLE IF NOT EXISTS sync_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_events_created ON sync_events(created_at);
+
+-- ─── New entities (appointments, contracts, leads, policy_folders,
+--     portal_users, schedules, syncro_users, wiki_pages, worksheet_results) ───
+
+CREATE TABLE IF NOT EXISTS appointment_types (
+  id INTEGER PRIMARY KEY,
+  name TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT,
+  synced INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS appointments (
+  id INTEGER PRIMARY KEY,
+  summary TEXT,
+  description TEXT,
+  customer_id INTEGER,
+  ticket_id INTEGER,
+  start_at TEXT,
+  end_at TEXT,
+  duration INTEGER,
+  location TEXT,
+  appointment_location_type TEXT,
+  start_at_label TEXT,
+  all_day INTEGER DEFAULT 0,
+  do_not_email INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT,
+  synced INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS contracts (
+  id INTEGER PRIMARY KEY,
+  account_id TEXT,
+  customer_id INTEGER,
+  name TEXT,
+  contract_amount TEXT,
+  start_date TEXT,
+  end_date TEXT,
+  description TEXT,
+  status TEXT,
+  likelihood TEXT,
+  apply_to_all INTEGER DEFAULT 0,
+  primary_contact TEXT,
+  sla_id TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT,
+  synced INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS leads (
+  id INTEGER PRIMARY KEY,
+  name TEXT,
+  first_name TEXT,
+  last_name TEXT,
+  email TEXT,
+  phone TEXT,
+  mobile TEXT,
+  address TEXT,
+  city TEXT,
+  state TEXT,
+  zip TEXT,
+  status TEXT,
+  customer_id INTEGER,
+  contact_id INTEGER,
+  description TEXT,
+  ticket_id INTEGER,
+  ticket_subject TEXT,
+  ticket_description TEXT,
+  ticket_problem_type TEXT,
+  mailbox_id INTEGER,
+  mailbox_name TEXT,
+  business_then_name TEXT,
+  has_attachments INTEGER DEFAULT 0,
+  message_read INTEGER DEFAULT 0,
+  user_id TEXT,
+  location_id TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT,
+  synced INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS policy_folders (
+  id INTEGER PRIMARY KEY,
+  name TEXT,
+  customer_id INTEGER,
+  asset_id INTEGER,
+  description TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT,
+  synced INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS portal_users (
+  id INTEGER PRIMARY KEY,
+  account_id TEXT,
+  portal_group_id TEXT,
+  email TEXT,
+  disabled INTEGER DEFAULT 0,
+  customer_id INTEGER,
+  contact_id INTEGER,
+  mobile TEXT,
+  confirmed_mobile TEXT,
+  require_mfa INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT,
+  synced INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS schedules (
+  id INTEGER PRIMARY KEY,
+  invoice_id INTEGER,
+  customer_id INTEGER,
+  name TEXT,
+  status TEXT,
+  amount TEXT,
+  next_date TEXT,
+  start_date TEXT,
+  end_date TEXT,
+  frequency TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT,
+  synced INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS syncro_users (
+  id INTEGER PRIMARY KEY,
+  account_id TEXT,
+  email TEXT,
+  name TEXT,
+  first_name TEXT,
+  last_name TEXT,
+  disabled INTEGER DEFAULT 0,
+  type TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT,
+  synced INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS wiki_pages (
+  id INTEGER PRIMARY KEY,
+  account_id TEXT,
+  name TEXT,
+  slug TEXT,
+  body TEXT,
+  interpolated_body TEXT,
+  parent_id INTEGER,
+  modified TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT,
+  synced INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS worksheet_results (
+  id INTEGER PRIMARY KEY,
+  ticket_id INTEGER,
+  name TEXT,
+  body TEXT,
+  result TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT,
+  synced INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_appointments_ticket ON appointments(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_appointments_customer ON appointments(customer_id);
+CREATE INDEX IF NOT EXISTS idx_appointments_start ON appointments(start_at);
+CREATE INDEX IF NOT EXISTS idx_contracts_customer ON contracts(customer_id);
+CREATE INDEX IF NOT EXISTS idx_leads_customer ON leads(customer_id);
+CREATE INDEX IF NOT EXISTS idx_policy_folders_customer ON policy_folders(customer_id);
+CREATE INDEX IF NOT EXISTS idx_policy_folders_asset ON policy_folders(asset_id);
+CREATE INDEX IF NOT EXISTS idx_portal_users_customer ON portal_users(customer_id);
+CREATE INDEX IF NOT EXISTS idx_portal_users_contact ON portal_users(contact_id);
+CREATE INDEX IF NOT EXISTS idx_schedules_invoice ON schedules(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_schedules_customer ON schedules(customer_id);
+CREATE INDEX IF NOT EXISTS idx_worksheet_results_ticket ON worksheet_results(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_wiki_pages_slug ON wiki_pages(slug);

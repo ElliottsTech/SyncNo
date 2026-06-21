@@ -156,4 +156,15 @@ router.get('/:id/payments', (req, res) => {
   })));
 });
 
+// GET /api/customers/:id/schedules
+router.get('/:id/schedules', (req, res) => {
+  const db = getDb();
+  const schedules = db.prepare(`
+    SELECT id, invoice_id, name, status, amount, next_date, start_date, end_date, frequency, synced
+    FROM schedules WHERE customer_id = ?
+    ORDER BY next_date DESC
+  `).all(req.params.id);
+  res.json(schedules);
+});
+
 export default router;

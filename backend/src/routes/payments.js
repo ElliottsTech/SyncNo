@@ -54,7 +54,7 @@ router.get('/', (req, res) => {
   const countRow = db.prepare(`SELECT COUNT(*) as total FROM payments ${whereStr}`).get(...params);
   const rows = db.prepare(`
     SELECT id, created_at, updated_at, success, payment_amount, invoice_ids, ref_num,
-           applied_at, payment_method, customer_id, synced
+           applied_at, payment_method, customer_id, customer, synced
     FROM payments ${whereStr}
     ORDER BY ${safeSort} ${safeDir}
     LIMIT ? OFFSET ?

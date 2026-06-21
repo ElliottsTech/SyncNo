@@ -12,6 +12,7 @@ syncno/
 │       └── routes/       # API endpoints (customers, tickets, invoices, etc.)
 ├── frontend/             # Next.js 14 app (port 3001)
 │   └── app/             # App router pages
+├── scripts/             # Operational scripts (update.sh)
 ├── docker-compose.yml    # Production deployment
 └── setup-ubuntu.sh      # One-shot server setup
 ```
@@ -48,11 +49,16 @@ AZURE_CLIENT_ID=your-azure-app-client-id
 AZURE_CLIENT_SECRET=your-azure-app-client-secret
 AZURE_TENANT_ID=your-azure-tenant-id
 
-# API URL (frontend → backend)
-NEXT_PUBLIC_API_URL=http://localhost:3002/api
+# Frontend → backend proxy target (Docker: http://backend:3002, local: http://localhost:3002)
+BACKEND_URL=http://backend:3002
+NEXT_PUBLIC_API_URL=/api
+
+# Service key — shared secret for NextAuth server-side callbacks and MCP servers.
+# Backend accepts Authorization: Bearer <SYNCNO_API_KEY> as alternative to browser cookie.
+SYNCNO_API_KEY=openssl rand -base64 32
 ```
 
-Generate a secret: `openssl rand -base64 32`
+Generate secrets: `openssl rand -base64 32`
 
 ---
 
@@ -87,6 +93,29 @@ npm run import --workspace=backend
 
 ---
 
+## Security Model
+
+The backend (Express, port 3002) is **not published** in Docker — it lives only on the internal Docker network. All browser traffic is proxied through the Next.js frontend via a rewrite (`/api/:path*` → `${BACKEND_URL}/api/:path*`). Cookies are forwarded by the rewrite, so the browser's NextAuth session authenticates the request at the backend.
+
+Backend auth middleware (`backend/src/index.js`) accepts one of:
+1. **NextAuth session cookie** — browser via the proxy. JWT decoded against `NEXTAUTH_SECRET`.
+2. **`Authorization: Bearer <SYNCNO_API_KEY>`** — for service-to-service calls (NextAuth callbacks in `app/lib/auth.ts`) and future MCP servers running on the same host.
+
+Anything else returns `401`.
+
+Authorization rules:
+- All data reads (`/api/customers`, `/api/tickets`, etc.): any authenticated user.
+- Sync mutating routes (`POST /sync/trigger`, `/save`, `/reset`, `/schedule`, `/enabled`, `PATCH /synced`, `DELETE /sync/trigger`, `POST /sync/preview`): admin only.
+- User management (`GET /users`, `GET /users/:id`, `PUT /users/:id/role`): admin only.
+- Internal auth-helper routes (`POST /users/upsert`, `GET /users/:id/role`, `PUT /users/:id/last-login`): service key only — browser cannot call them.
+- `/api/health` and `/api/auth/*`: public.
+
+### Integrating an MCP server
+
+Run the MCP server on the same host (or Docker network). Read `SYNCNO_API_KEY` and `BACKEND_URL` from the environment, send `Authorization: Bearer <key>` on every request. No special endpoints — the same routes the frontend uses are available to the MCP server. Service-key requests are tagged `req.user.role === 'service'`; they pass `requireAuth` but not `requireAdmin`, so admin-only mutations stay blocked.
+
+---
+
 ## Docker Deployment
 
 ```bash
@@ -100,6 +129,7 @@ NEXTAUTH_SECRET=<generate with openssl rand -base64 32>
 NEXTAUTH_URL=https://your-domain.com
 SYNCRO_API_KEY=<your-key>
 SYNCRO_SUBDOMAIN=<your-subdomain>
+SYNCNO_API_KEY=<generate with openssl rand -base64 32>
 AZURE_CLIENT_ID=<from Azure portal>
 AZURE_CLIENT_SECRET=<from Azure portal>
 AZURE_TENANT_ID=<from Azure portal>
@@ -114,8 +144,8 @@ docker compose logs -f
 ```
 
 Services:
-- **Frontend:** http://your-server:3001
-- **Backend API:** http://your-server:3002/api
+- **Frontend:** http://your-server:3001 (only published port)
+- **Backend API:** reachable only inside the Docker network at `http://backend:3002/api`. Browser requests proxied through the frontend at `/api/*`.
 
 ---
 
@@ -149,10 +179,50 @@ The sync page (`/syncro`) shows sync status. "Sync" pulls records updated since 
 ## Production Notes
 
 - **Database:** SQLite file lives in `backend/data/syncro.db` (Docker volume)
-- **Sync:** Runs on-demand from the `/syncro` page. Add a cron job or external scheduler to trigger `POST /api/sync/trigger` periodically
-- **Reverse proxy:** Put Nginx in front of both containers for TLS termination and custom domain
+- **Sync:** Runs on-demand from the `/syncro` page. Add a cron job or external scheduler to trigger `POST /api/sync/trigger` periodically (requires admin session cookie or service key)
+- **Reverse proxy:** Put Nginx in front of the frontend container for TLS termination and custom domain. Backend does not need to be exposed publicly.
 - **Backups:** Back up the SQLite file and `.env` — both contain all app data and credentials
 - **Rate limiting:** Syncro API is throttled. The sync code handles 429s with 65s backoff
+- **MCP integration:** Place MCP servers on the same Docker network. They authenticate with `Authorization: Bearer ${SYNCNO_API_KEY}`. Backend exposes no MCP-specific endpoints; reuse existing API routes.
+
+---
+
+## Updating SyncNo
+
+Admin sidebar shows the current commit SHA. When `origin/main` moves ahead, a yellow "Update" pill appears with the new SHA.
+
+**To update:**
+
+```bash
+ssh user@server
+sudo /opt/syncno/scripts/update.sh
+```
+
+The script:
+1. Verifies clean working tree and responsive Docker daemon
+2. Fetches `origin/main`, fast-forwards
+3. Rebuilds containers (`docker compose build`)
+4. Restarts services (`docker compose up -d`)
+5. Polls `http://localhost:3001/api/health` for up to 90s
+
+**On failure** (build error, restart failure, or health check timeout), the script exits non-zero and prints a rollback block:
+
+```
+UPDATE FAILED at phase: <phase>
+
+To roll back manually:
+  cd /opt/syncno
+  git reset --hard <previous-sha>
+  docker compose build
+  docker compose up -d
+
+Then verify: curl http://localhost:3001/api/health
+Logs: docker compose logs --tail=100
+```
+
+No auto-rollback — admin decides whether to roll back or fix forward.
+
+**Note:** Backend container needs read access to `/opt/syncno/.git` to resolve the current SHA. If git is unavailable inside the container, `update.sh` writes `/opt/syncno/.deploy-sha` on successful update as a fallback.
 
 ---
 
@@ -162,14 +232,225 @@ The sync page (`/syncro`) shows sync status. "Sync" pulls records updated since 
 |-------|------|
 | `/` | Dashboard / tickets |
 | `/customers` | Customer list |
+| `/customers/[id]` | Customer detail (contacts, tickets, assets, invoices, estimates, payments, schedules) |
 | `/invoices` | Invoice list |
 | `/tickets` | Ticket list |
+| `/tickets/[id]` | Ticket detail (comments, time entries, line items, invoices, estimates, appointments, worksheets) |
 | `/assets` | Asset list |
 | `/estimates` | Estimates |
 | `/purchase-orders` | Purchase orders |
 | `/vendors` | Vendors |
+| `/products` | Products |
+| `/payments` | Payments |
+| `/appointments` | Appointments |
+| `/appointment_types` | Appointment types |
+| `/contracts` | Contracts |
+| `/leads` | Leads |
+| `/policy_folders` | Policy folders |
+| `/portal_users` | Portal users |
+| `/schedules` | Schedules |
+| `/syncro_users` | Syncro users |
+| `/wiki_pages` | Wiki pages |
 | `/search` | Global search |
 | `/syncro` | Sync settings & trigger |
 | `/logs` | Activity logs |
 | `/users` | User management |
 | `/login` | Azure AD login |
+
+---
+
+## API Reference
+
+Base URL: `http://localhost:3002/api`
+
+All list endpoints support query params:
+
+| Param | Purpose |
+|-------|---------|
+| `filter_<column>` | Exact match filter (e.g. `?filter_display_name=Hip`) |
+| `sortCol` | Column to sort by |
+| `sortDir` | `asc` or `desc` |
+| `limit` | Page size |
+| `offset` | Pagination offset |
+
+### Customers `/customers`
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/` | List; `display_name` = `COALESCE(NULLIF(business_name,''), fullname)` |
+| GET | `/:id` | Detail |
+| GET | `/:id/contacts` | |
+| GET | `/:id/tickets` | |
+| GET | `/:id/assets` | |
+| GET | `/:id/invoices` | |
+| GET | `/:id/estimates` | |
+| GET | `/:id/payments` | |
+| GET | `/:id/schedules` | |
+
+### Tickets `/tickets`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+| GET | `/:id/comments` |
+| GET | `/:id/time_entries` |
+| GET | `/:id/line_items` |
+| GET | `/:id/invoices` |
+| GET | `/:id/estimates` |
+| GET | `/:id/appointments` |
+| GET | `/:ticket_id/worksheet_results` |
+| GET | `/:ticket_id/worksheet_results/:id` |
+
+### Invoices `/invoices`
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/` | Computed `payment_status`: paid / overdue / unpaid |
+| GET | `/:id` | |
+| GET | `/:id/payments` | |
+| GET | `/:id/ticket` | Linked ticket |
+
+### Estimates `/estimates`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+
+### Payments `/payments`
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/` | Linked to invoices via `invoice_ids` JSON array |
+| GET | `/:id` | |
+
+### Vendors `/vendors`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+| GET | `/:id/purchase_orders` |
+
+### Purchase Orders `/purchase-orders`
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/` | Line items joined with products for names |
+| GET | `/:id` | |
+
+### Assets `/assets`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+
+### Products `/products`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/categories` |
+| GET | `/:id` |
+| GET | `/:id/tickets` |
+
+### Serials `/serials`
+| Method | Path |
+|--------|------|
+| GET | `/:serial` | Lookup product by serial |
+
+### Appointment Types `/appointment_types`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+
+### Appointments `/appointments`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+
+### Contracts `/contracts`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+
+### Leads `/leads`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+
+### Policy Folders `/policy_folders`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+
+### Portal Users `/portal_users`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+
+### Schedules `/schedules`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+
+### Syncro Users `/syncro_users`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+
+### Wiki Pages `/wiki_pages`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| GET | `/:id` |
+
+### Users `/users`
+| Method | Path | Auth |
+|--------|------|------|
+| POST | `/upsert` | |
+| PUT | `/:id/last-login` | |
+| GET | `/:id/role` | |
+| GET | `/` | Admin only |
+| GET | `/:id` | Admin only |
+| PUT | `/:id/role` | Admin only |
+
+### Logs `/logs`
+| Method | Path |
+|--------|------|
+| GET | `/` |
+| POST | `/` |
+
+### Search `/search`
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/` | Global search across entities |
+
+### Sync `/sync`
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/status` | Current sync status |
+| GET | `/last-results` | Last sync outcome |
+| GET | `/progress` | Live progress |
+| GET | `/events` | Event stream |
+| GET | `/enabled` | Sync enabled flag |
+| POST | `/enabled` | Toggle sync |
+| GET | `/schedule` | Schedule config |
+| POST | `/schedule` | Update schedule |
+| POST | `/save` | Save mapping/config |
+| POST | `/preview` | Preview changes |
+| POST | `/trigger` | Incremental sync (updated since last) |
+| DELETE | `/trigger` | Cancel in-progress sync |
+| POST | `/reset` | Reset sync state |
+| PATCH | `/synced` | Mark record synced |
+
+### Health
+| Method | Path |
+|--------|------|
+| GET | `/api/health` | Returns `{ "status": "ok" }` |
+
+### System `/system`
+| Method | Path | Auth | Notes |
+|--------|------|------|-------|
+| GET | `/version` | Admin only | `{ current, latest, updateAvailable }`. Pass `?refresh=true` to bypass cache. |

@@ -50,16 +50,25 @@ read -p "SYNCRO_SUBDOMAIN: " SYNCRO_SUBDOMAIN
 read -p "Azure Client ID: " AZURE_CLIENT_ID
 read -p "Azure Client Secret: " AZURE_CLIENT_SECRET
 read -p "Azure Tenant ID: " AZURE_TENANT_ID
+read -p "SYNCNO_API_KEY (leave blank to auto-generate): " SYNCNO_API_KEY
 
 # Generate default NEXTAUTH_SECRET if empty
 if [ -z "$NEXTAUTH_SECRET" ]; then
   NEXTAUTH_SECRET=$(openssl rand -base64 32)
 fi
 
+# Generate SYNCNO_API_KEY if not provided — shared secret for service-to-service
+# auth (NextAuth callbacks) and MCP servers.
+if [ -z "$SYNCNO_API_KEY" ]; then
+  SYNCNO_API_KEY=$(openssl rand -base64 32)
+fi
+
 cat > "$ENV_FILE" << EOF
 NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
 NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3001}
-NEXT_PUBLIC_API_URL=http://backend:3002/api
+NEXT_PUBLIC_API_URL=/api
+BACKEND_URL=http://backend:3002
+SYNCNO_API_KEY=${SYNCNO_API_KEY}
 SYNCRO_API_KEY=${SYNCRO_API_KEY}
 SYNCRO_SUBDOMAIN=${SYNCRO_SUBDOMAIN}
 AZURE_CLIENT_ID=${AZURE_CLIENT_ID}

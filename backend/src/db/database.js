@@ -46,6 +46,40 @@ export function initDb() {
     try { db.exec(alt); } catch (e) { /* column may already exist */ }
   }
 
+  // Migrate leads table: expand to capture full API shape.
+  const alterLeads = [
+    'ALTER TABLE leads ADD COLUMN first_name TEXT',
+    'ALTER TABLE leads ADD COLUMN last_name TEXT',
+    'ALTER TABLE leads ADD COLUMN address TEXT',
+    'ALTER TABLE leads ADD COLUMN city TEXT',
+    'ALTER TABLE leads ADD COLUMN state TEXT',
+    'ALTER TABLE leads ADD COLUMN zip TEXT',
+    'ALTER TABLE leads ADD COLUMN contact_id INTEGER',
+    'ALTER TABLE leads ADD COLUMN ticket_id INTEGER',
+    'ALTER TABLE leads ADD COLUMN ticket_subject TEXT',
+    'ALTER TABLE leads ADD COLUMN ticket_description TEXT',
+    'ALTER TABLE leads ADD COLUMN ticket_problem_type TEXT',
+    'ALTER TABLE leads ADD COLUMN mailbox_id INTEGER',
+    'ALTER TABLE leads ADD COLUMN mailbox_name TEXT',
+    'ALTER TABLE leads ADD COLUMN business_then_name TEXT',
+    'ALTER TABLE leads ADD COLUMN has_attachments INTEGER DEFAULT 0',
+    'ALTER TABLE leads ADD COLUMN message_read INTEGER DEFAULT 0',
+    'ALTER TABLE leads ADD COLUMN user_id TEXT',
+    'ALTER TABLE leads ADD COLUMN location_id TEXT',
+  ];
+  for (const alt of alterLeads) {
+    try { db.exec(alt); } catch (e) { /* column may already exist */ }
+  }
+
+  // Migrate tickets table: attachment denormalization for fast list rendering.
+  const alterTickets = [
+    'ALTER TABLE tickets ADD COLUMN attachments_count INTEGER DEFAULT 0',
+    'ALTER TABLE tickets ADD COLUMN attachments_synced_at TEXT',
+  ];
+  for (const alt of alterTickets) {
+    try { db.exec(alt); } catch (e) { /* column may already exist */ }
+  }
+
   return db;
 }
 

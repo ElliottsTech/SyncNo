@@ -9,4 +9,7 @@ node_modules
 .env
 .env.local
 .env.production
+.backup.env
 SyncNo/*
+backend/data/json_export/
+.restic-password

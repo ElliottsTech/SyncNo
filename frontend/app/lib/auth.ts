@@ -1,11 +1,28 @@
 import { NextAuthOptions } from 'next-auth';
 
-const API = process.env.NEXT_PUBLIC_API_URL || '/api';
+// Browser code uses NEXT_PUBLIC_API_URL (relative '/api' → Next.js rewrite → backend).
+// This file runs server-side only (NextAuth handler + middleware), so fetches need
+// an absolute URL — use BACKEND_URL to hit the backend directly inside the Docker
+// network with the service key.
+const SERVER_API = process.env.BACKEND_URL
+  ? `${process.env.BACKEND_URL}/api`
+  : process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002/api';
+const SERVICE_KEY = process.env.SYNCNO_API_KEY;
 const ROLE_REFRESH_MS = 5 * 60 * 1000;
+
+// Server-side calls from NextAuth callbacks run before/independent of a user
+// session. Authenticate to the backend via the shared service key.
+function serviceHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const h: Record<string, string> = { ...extra };
+  if (SERVICE_KEY) h['Authorization'] = `Bearer ${SERVICE_KEY}`;
+  return h;
+}
 
 async function fetchRole(userId: string): Promise<'admin' | 'user' | null> {
   try {
-    const r = await fetch(`${API}/users/${encodeURIComponent(userId)}/role`);
+    const r = await fetch(`${SERVER_API}/users/${encodeURIComponent(userId)}/role`, {
+      headers: serviceHeaders(),
+    });
     if (!r.ok) return null;
     const data = await r.json();
     return data.role === 'admin' ? 'admin' : 'user';
@@ -46,9 +63,9 @@ export const authOptions: NextAuthOptions = {
     async signIn({ user, account }: any) {
       if (account?.provider === 'azure-ad' && user?.email) {
         try {
-          await fetch(`${API}/users/upsert`, {
+          await fetch(`${SERVER_API}/users/upsert`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: serviceHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({
               id: user.id,
               email: user.email,

@@ -24,24 +24,42 @@ function enrichLineItems(lineItems) {
 // GET /api/estimates - all estimates
 router.get('/', (req, res) => {
   const db = getDb();
-  const { page = 1, limit = 50 } = req.query;
+  const {
+    page = 1, limit = 50, sortCol = 'date', sortDir = 'desc',
+    filter_number, filter_customer_business_then_name, filter_status, filter_date, filter_total,
+  } = req.query;
   const offset = (page - 1) * limit;
 
-  const countRow = db.prepare('SELECT COUNT(*) as total FROM estimates').get();
+  const conditions = [];
+  const params = [];
+  if (filter_number) { conditions.push('e.number LIKE ?'); params.push(`%${filter_number}%`); }
+  if (filter_customer_business_then_name) { conditions.push('e.customer_business_then_name LIKE ?'); params.push(`%${filter_customer_business_then_name}%`); }
+  if (filter_status) { conditions.push('e.status LIKE ?'); params.push(`%${filter_status}%`); }
+  if (filter_date) { conditions.push('e.date LIKE ?'); params.push(`%${filter_date}%`); }
+  if (filter_total) { conditions.push('CAST(e.total AS TEXT) LIKE ?'); params.push(`%${filter_total}%`); }
+
+  const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+  const validSorts = ['date', 'number', 'status', 'total', 'created_at'];
+  const safeSort = validSorts.includes(sortCol) ? sortCol : 'date';
+  const safeDir = sortDir === 'asc' ? 'ASC' : 'DESC';
+
+  const countRow = db.prepare(`SELECT COUNT(*) as total FROM estimates e ${whereStr}`).get(...params);
   const estimates = db.prepare(`
     SELECT e.id, e.number, e.status, e.date, e.subtotal, e.total, e.tax,
            e.customer_id, e.customer_business_then_name, e.raw_json, e.synced
-    FROM estimates e
-    ORDER BY e.date DESC
+    FROM estimates e ${whereStr}
+    ORDER BY e.${safeSort} ${safeDir}
     LIMIT ? OFFSET ?
-  `).all(Number(limit), Number(offset));
+  `).all(...params, Number(limit), Number(offset));
 
   const result = estimates.map(e => {
     if (e.raw_json && typeof e.raw_json === 'string') {
       try {
         const raw = JSON.parse(e.raw_json);
         if (raw.customer) {
-          e.customer_name = raw.customer.business_name || raw.customer.business_then_name || raw.customer.fullname || e.customer_business_then_name;
+          const name = raw.customer.business_then_name || raw.customer.business_name || raw.customer.fullname;
+          if (name) e.customer_business_then_name = name;
+          e.customer_name = name || e.customer_business_then_name;
           e.customer = raw.customer;
         }
       } catch (_) {}

@@ -3,8 +3,10 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    ports:
-      - "3002:3002"
+    # No ports published — backend only reachable inside the Docker network.
+    # Frontend proxies browser traffic via Next.js rewrites.
+    expose:
+      - "3002"
     volumes:
       - sqlite-data:/app/data
       - /root/SyncNo/SyncNo:/root/SyncNo/SyncNo:ro
@@ -12,7 +14,7 @@ services:
     environment:
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       NEXTAUTH_URL: ${NEXTAUTH_URL}
-      NEXT_PUBLIC_API_URL: http://localhost:3002/api
+      SYNCNO_API_KEY: ${SYNCNO_API_KEY}
       SYNCRO_API_KEY: ${SYNCRO_API_KEY}
       SYNCRO_SUBDOMAIN: ${SYNCRO_SUBDOMAIN}
     restart: unless-stopped
@@ -21,8 +23,6 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_API_URL: https://syncno.elliotts.tech/api
     ports:
       - "3001:3001"
     environment:
@@ -30,7 +30,9 @@ services:
       HOSTNAME: "0.0.0.0"
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       NEXTAUTH_URL: ${NEXTAUTH_URL}
-      NEXT_PUBLIC_API_URL: https://syncno.elliotts.tech/api
+      NEXT_PUBLIC_API_URL: /api
+      BACKEND_URL: http://backend:3002
+      SYNCNO_API_KEY: ${SYNCNO_API_KEY}
       AZURE_CLIENT_ID: ${AZURE_CLIENT_ID}
       AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET}
       AZURE_TENANT_ID: ${AZURE_TENANT_ID}

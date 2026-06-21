@@ -77,7 +77,7 @@ export default function UsersPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Users</h1>
+      <h1 className="text-2xl font-bold mb-6">SyncNo Users</h1>
 
       {error && (
         <div className="mb-4 bg-red-50 border border-red-200 text-red-700 p-3 rounded text-sm">
@@ -86,6 +86,10 @@ export default function UsersPage() {
       )}
 
       <div className="bg-white rounded border overflow-hidden">
+        <div className="px-4 py-3 bg-gray-50 border-b">
+          <h2 className="font-semibold">Users who can log into Syncno</h2>
+          <p className="text-xs text-gray-500">Syncro technicians live in <a href="/syncro_users" className="text-blue-600 hover:underline">Syncro Users</a></p>
+        </div>
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>

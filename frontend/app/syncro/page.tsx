@@ -5,15 +5,13 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import SyncTerminal from '@/components/SyncTerminal';
 import type { HttpLogEntry } from '@/components/SyncTerminal';
+import CollapsibleSection from '../../components/CollapsibleSection';
 import { usePageTitle } from '../../lib/usePageTitle';
 
-// Sync API calls go directly to backend, bypassing NextAuth proxy
-// Use backend port so auth middleware doesn't block status checks
-const API = (typeof window !== 'undefined' && window.location.port === '3001')
-  ? 'http://localhost:3002/api'  // local Docker: browser→frontend:3001 but sync→backend:3002
-  : '/api';  // fallback: use proxy (auth required)
+// All API calls go through the Next.js rewrite proxy (/api → backend).
+const API = '/api';
 
-type Phase = 'customers' | 'contacts' | 'tickets' | 'invoices' | 'assets' | 'estimates' | 'purchase_orders' | 'vendors' | 'products' | 'payments' | 'product_serials';
+type Phase = 'customers' | 'contacts' | 'tickets' | 'invoices' | 'assets' | 'estimates' | 'purchase_orders' | 'vendors' | 'products' | 'payments' | 'product_serials' | 'appointments' | 'contracts' | 'leads' | 'policy_folders' | 'portal_users' | 'schedules' | 'syncro_users' | 'wiki_pages' | 'worksheet_results';
 
 type PhaseProgress = {
   phase: Phase;
@@ -29,7 +27,7 @@ type LastResult = {
   last_sync: string | null;
 };
 
-const ENTITY_PHASES: Phase[] = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials'];
+const ENTITY_PHASES: Phase[] = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
 
 const PHASE_LABELS: Record<Phase, string> = {
   customers: 'Customers',
@@ -43,6 +41,15 @@ const PHASE_LABELS: Record<Phase, string> = {
   products: 'Products',
   payments: 'Payments',
   product_serials: 'Product Serials',
+  appointments: 'Appointments',
+  contracts: 'Contracts',
+  leads: 'Leads',
+  policy_folders: 'Policy Folders',
+  portal_users: 'Portal Users',
+  schedules: 'Schedules',
+  syncro_users: 'Syncro Users',
+  wiki_pages: 'Wiki Pages',
+  worksheet_results: 'Worksheet Results',
 };
 
 type ActiveSync = {
@@ -52,7 +59,7 @@ type ActiveSync = {
   storedEvents: string[];  // SSE event lines persisted to sessionStorage
 };
 
-function SchedulerSection() {
+function SchedulerSection({ visiblePhases }: { visiblePhases: Phase[] }) {
   const [schedule, setSchedule] = useState<Record<string, { time: string; enabled: boolean; last_fired: string | null }>>({});
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -66,7 +73,7 @@ function SchedulerSection() {
         const s = data.schedule || {};
         setSchedule(s);
         const d: Record<string, string> = {};
-        for (const ent of ENTITY_PHASES) {
+        for (const ent of visiblePhases) {
           d[ent] = s[ent]?.time || '';
         }
         setDraft(d);
@@ -79,7 +86,7 @@ function SchedulerSection() {
     setError(null);
     try {
       const payload: Record<string, string> = {};
-      for (const ent of ENTITY_PHASES) {
+      for (const ent of visiblePhases) {
         payload[ent] = (draft[ent] || '').trim();
       }
       const res = await fetch(`${API}/sync/schedule`, {
@@ -104,13 +111,16 @@ function SchedulerSection() {
   }
 
   return (
-    <div className="bg-white rounded border p-4 mb-4">
-      <div className="flex items-baseline justify-between mb-3">
-        <h2 className="font-semibold">Scheduler</h2>
-        <span className="text-xs text-gray-500">Daily delta sync per entity (server local time)</span>
-      </div>
+    <CollapsibleSection
+      title="Scheduler"
+      containerClassName="bg-white rounded border p-4 mb-4 border-t-0"
+      bodyClassName="mt-3"
+      headerClassName="w-full flex justify-between items-center text-left -mt-1 mb-3"
+      defaultOpen={false}
+    >
+      <div className="text-xs text-gray-500 -mt-2 mb-3">Daily delta sync per entity (server local time)</div>
       <div className="grid grid-cols-1 gap-2">
-        {ENTITY_PHASES.map(phase => {
+        {visiblePhases.map(phase => {
           const cfg = schedule[phase] || { time: '', enabled: false, last_fired: null };
           const draftVal = draft[phase] ?? '';
           return (
@@ -150,7 +160,7 @@ function SchedulerSection() {
           Empty time = disabled. Scheduler checks every minute; fires once per day per entity.
         </span>
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -168,32 +178,51 @@ export default function SyncroPage() {
   const [status, setStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
-  const [entityStatus, setEntityStatus] = useState<Record<Phase, PhaseProgress | null>>({
-    customers: null, contacts: null, tickets: null, invoices: null,
-    assets: null, estimates: null, purchase_orders: null, vendors: null, products: null,
-    payments: null, product_serials: null,
-  });
+  // Enabled entities drives visibility in SchedulerSection + Sync Data section.
+  // Default = all enabled until fetch completes (matches pre-feature behavior).
+  const [enabledEntities, setEnabledEntities] = useState<Set<Phase>>(() => new Set(ENTITY_PHASES));
+  useEffect(() => {
+    fetch(`${API}/sync/enabled`)
+      .then(r => r.json())
+      .then(d => {
+        if (Array.isArray(d.entities)) setEnabledEntities(new Set(d.entities as Phase[]));
+      })
+      .catch(() => {});
+  }, []);
+  const visiblePhases = ENTITY_PHASES.filter(p => enabledEntities.has(p));
 
-  const [lastResults, setLastResults] = useState<Record<Phase, LastResult>>({
-    customers: { count: 0, error: null, last_sync: null },
-    contacts: { count: 0, error: null, last_sync: null },
-    tickets: { count: 0, error: null, last_sync: null },
-    invoices: { count: 0, error: null, last_sync: null },
-    assets: { count: 0, error: null, last_sync: null },
-    estimates: { count: 0, error: null, last_sync: null },
-    purchase_orders: { count: 0, error: null, last_sync: null },
-    vendors: { count: 0, error: null, last_sync: null },
-    products: { count: 0, error: null, last_sync: null },
-    payments: { count: 0, error: null, last_sync: null },
-    product_serials: { count: 0, error: null, last_sync: null },
-  });
+  const [entityStatus, setEntityStatus] = useState<Record<Phase, PhaseProgress | null>>(
+    () => Object.fromEntries(ENTITY_PHASES.map(p => [p, null])) as Record<Phase, PhaseProgress | null>
+  );
+
+  const [lastResults, setLastResults] = useState<Record<Phase, LastResult>>(
+    () => Object.fromEntries(ENTITY_PHASES.map(p => [p, { count: 0, error: null, last_sync: null }])) as Record<Phase, LastResult>
+  );
 
   const [syncAllSyncing, setSyncAllSyncing] = useState(false);
-  const [syncAllProgress, setSyncAllProgress] = useState<Record<Phase, PhaseProgress | null>>({
-    customers: null, contacts: null, tickets: null, invoices: null,
-    assets: null, estimates: null, purchase_orders: null, vendors: null, products: null,
-    payments: null, product_serials: null,
-  });
+  const [syncAllProgress, setSyncAllProgress] = useState<Record<Phase, PhaseProgress | null>>(
+    () => Object.fromEntries(ENTITY_PHASES.map(p => [p, null])) as Record<Phase, PhaseProgress | null>
+  );
+
+  // Optional date range for sync runs. Currently applied to appointments only
+  // (Syncro /appointments supports date_from/date_to; other endpoints ignore).
+  // Empty = use backend defaults (appointments = 10y back / 2y forward).
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [showDatePanel, setShowDatePanel] = useState(false);
+  const datePanelRef = useRef<HTMLDivElement>(null);
+
+  // Close date panel on outside click
+  useEffect(() => {
+    if (!showDatePanel) return;
+    function onDown(e: MouseEvent) {
+      if (datePanelRef.current && !datePanelRef.current.contains(e.target as Node)) {
+        setShowDatePanel(false);
+      }
+    }
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [showDatePanel]);
 
   const [previewing, setPreviewing] = useState(false);
   const [previewResult, setPreviewResult] = useState<any>(null);
@@ -221,7 +250,7 @@ export default function SyncroPage() {
       .then(r => r.json())
       .then(data => {
         // Check if any entity has a non-idle phase
-        const states = [data.tickets, data.customers, data.contacts, data.invoices, data.assets, data.estimates, data.purchase_orders, data.vendors, data.products, data.payments, data.product_serials];
+        const states = ENTITY_PHASES.map(p => data[p]);
         const anyRunning = states.some(s => s && s.phase && s.phase !== 'idle' && s.phase !== 'error');
 
         if (anyRunning) {
@@ -229,19 +258,9 @@ export default function SyncroPage() {
           // Restore syncAllProgress from sessionStorage (survives refresh),
           // then overlay with fresh backend state for accuracy
           const storedProgress = loadSyncProgress();
-          const backendProgress = {
-            tickets: buildProgressFromState('tickets', data.tickets),
-            customers: buildProgressFromState('customers', data.customers),
-            contacts: buildProgressFromState('contacts', data.contacts),
-            invoices: buildProgressFromState('invoices', data.invoices),
-            assets: buildProgressFromState('assets', data.assets),
-            estimates: buildProgressFromState('estimates', data.estimates),
-            purchase_orders: buildProgressFromState('purchase_orders', data.purchase_orders),
-            vendors: buildProgressFromState('vendors', data.vendors),
-            products: buildProgressFromState('products', data.products),
-            payments: buildProgressFromState('payments', data.payments),
-            product_serials: buildProgressFromState('product_serials', data.product_serials),
-          };
+          const backendProgress = Object.fromEntries(
+            ENTITY_PHASES.map(p => [p, buildProgressFromState(p, data[p])])
+          ) as Record<Phase, PhaseProgress>;
           // Prefer sessionStorage progress if available, otherwise use backend state (never null)
           const mergedProgress = storedProgress || backendProgress;
           setSyncAllProgress(mergedProgress);
@@ -291,7 +310,7 @@ export default function SyncroPage() {
         syncsInFlight.current.clear();
         sessionStorage.removeItem('activeSyncs');
         setSyncAllSyncing(false);
-        setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null, payments: null, product_serials: null });
+        setSyncAllProgress(Object.fromEntries(ENTITY_PHASES.map(p => [p, null])) as Record<Phase, PhaseProgress | null>);
         // Restore completedSync from sessionStorage so View Terminal still works after refresh
         const savedKey = loadActiveSyncKey();
         if (savedKey) {
@@ -343,24 +362,14 @@ export default function SyncroPage() {
           clearInterval(pollIntervalRef.current!);
           pollIntervalRef.current = null;
           setSyncAllSyncing(false);
-          setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null, payments: null, product_serials: null });
+          setSyncAllProgress(Object.fromEntries(ENTITY_PHASES.map(p => [p, null])) as Record<Phase, PhaseProgress | null>);
           setActiveSyncs({});
           fetchStatus();
           return;
         }
-        setSyncAllProgress({
-          tickets: buildProgressFromState('tickets', data.tickets),
-          customers: buildProgressFromState('customers', data.customers),
-          contacts: buildProgressFromState('contacts', data.contacts),
-          invoices: buildProgressFromState('invoices', data.invoices),
-          assets: buildProgressFromState('assets', data.assets),
-          estimates: buildProgressFromState('estimates', data.estimates),
-          purchase_orders: buildProgressFromState('purchase_orders', data.purchase_orders),
-          vendors: buildProgressFromState('vendors', data.vendors),
-            products: buildProgressFromState('products', data.products),
-            payments: buildProgressFromState('payments', data.payments),
-            product_serials: buildProgressFromState('product_serials', data.product_serials),
-        });
+        setSyncAllProgress(
+          Object.fromEntries(ENTITY_PHASES.map(p => [p, buildProgressFromState(p, data[p])])) as Record<Phase, PhaseProgress>
+        );
       } catch (_) {}
     }, 3000);
   }
@@ -400,19 +409,9 @@ export default function SyncroPage() {
     fetch(`${API}/sync/last-results`)
       .then(r => r.json())
       .then(data => {
-        setLastResults({
-          customers: data.customers || { count: 0, error: null, last_sync: null },
-          contacts: data.contacts || { count: 0, error: null, last_sync: null },
-          tickets: data.tickets || { count: 0, error: null, last_sync: null },
-          invoices: data.invoices || { count: 0, error: null, last_sync: null },
-          assets: data.assets || { count: 0, error: null, last_sync: null },
-          estimates: data.estimates || { count: 0, error: null, last_sync: null },
-          purchase_orders: data.purchase_orders || { count: 0, error: null, last_sync: null },
-          vendors: data.vendors || { count: 0, error: null, last_sync: null },
-          products: data.products || { count: 0, error: null, last_sync: null },
-          payments: data.payments || { count: 0, error: null, last_sync: null },
-          product_serials: data.product_serials || { count: 0, error: null, last_sync: null },
-        });
+        setLastResults(
+          Object.fromEntries(ENTITY_PHASES.map(p => [p, data[p] || { count: 0, error: null, last_sync: null }])) as Record<Phase, LastResult>
+        );
       })
       .catch(() => {});
   }
@@ -458,10 +457,10 @@ export default function SyncroPage() {
     });
     if (isAll) {
       setSyncAllSyncing(false);
-      setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null, payments: null, product_serials: null });
+      setSyncAllProgress(Object.fromEntries(ENTITY_PHASES.map(p => [p, null])) as Record<Phase, PhaseProgress | null>);
       sessionStorage.removeItem('syncProgress');
       if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-    } else if (phase && phase !== 'all') {
+    } else if (phase) {
       setEntityStatus(prev => ({ ...prev, [phase as Phase]: { phase: phase as Phase, status: 'cancelled' } }));
     }
     if (selectedSyncKey === key) setSelectedSyncKey(null);
@@ -470,7 +469,7 @@ export default function SyncroPage() {
       fetch(`${API}/sync/progress`)
         .then(r => r.json())
         .then(data => {
-          if (!isAll && phase && phase !== 'all') {
+          if (!isAll && phase) {
             const st = data[phase as Phase];
             if (st && st.detail_total) {
               setEntityStatus(prev => ({
@@ -553,7 +552,7 @@ export default function SyncroPage() {
     if (data.type === 'cancelled' || data.status === 'cancelled') {
       syncFinalizedRef.current['entity:all'] = true;
       setSyncAllSyncing(false);
-      const next = { customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null, payments: null, product_serials: null };
+      const next = Object.fromEntries(ENTITY_PHASES.map(p => [p, null])) as Record<Phase, PhaseProgress | null>;
       setSyncAllProgress(next);
       sessionStorage.removeItem('syncProgress');
       if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
@@ -721,7 +720,11 @@ export default function SyncroPage() {
       if (selectedSyncKey === key) setSelectedSyncKey(null);
       fetchStatus();
     };
-    xhr.send(JSON.stringify({ entity: phase }));
+    xhr.send(JSON.stringify({
+      entity: phase,
+      ...(phase === 'appointments' && dateFrom ? { date_from: dateFrom } : {}),
+      ...(phase === 'appointments' && dateTo ? { date_to: dateTo } : {}),
+    }));
   }
 
   // Sync All
@@ -744,7 +747,7 @@ export default function SyncroPage() {
     // Do NOT auto-open terminal — only via View Terminal button.
     setCompletedSync(null);
     setSyncAllSyncing(true);
-    setSyncAllProgress({ customers: null, contacts: null, tickets: null, invoices: null, assets: null, estimates: null, purchase_orders: null, vendors: null, products: null, payments: null, product_serials: null });
+    setSyncAllProgress(Object.fromEntries(ENTITY_PHASES.map(p => [p, null])) as Record<Phase, PhaseProgress | null>);
 
     xhr.onprogress = () => {
       buffer += xhr.responseText.slice(buffer.length);
@@ -822,7 +825,11 @@ export default function SyncroPage() {
       setSyncAllSyncing(false);
       if (selectedSyncKey === key) setSelectedSyncKey(null);
     };
-    xhr.send(JSON.stringify({ entity: 'all' }));
+    xhr.send(JSON.stringify({
+      entity: 'all',
+      ...(dateFrom ? { date_from: dateFrom } : {}),
+      ...(dateTo ? { date_to: dateTo } : {}),
+    }));
   }
 
   function phaseIcon(p: PhaseProgress | null) {
@@ -848,8 +855,6 @@ export default function SyncroPage() {
   if (loading) return <p className="text-gray-500">Loading...</p>;
 
   const s = status?.syncro;
-  const e = status?.entra;
-  const u = status?.urls;
 
   const activeSyncList = Object.entries(activeSyncs);
   const anySyncing = activeSyncList.length > 0;
@@ -861,54 +866,48 @@ export default function SyncroPage() {
       <div className="mt-4 max-w-xl">
         <h1 className="text-xl font-bold mb-6">Settings</h1>
 
-        {/* Syncro */}
-        <div className="bg-white rounded border p-4 mb-4">
-          <h2 className="font-semibold mb-3">Syncro</h2>
+        {/* Syncro status — credentials live in Config page now */}
+        <CollapsibleSection
+          title="Syncro"
+          containerClassName="bg-white rounded border p-4 mb-4"
+          bodyClassName="mt-3"
+          headerClassName="w-full flex justify-between items-center text-left -mt-1"
+          defaultOpen={!s?.configured}
+        >
           {s?.configured ? (
             <div className="text-sm space-y-1">
               <p className="text-green-600">✓ Configured</p>
-              <p>Subdomain: <span className="font-mono">{s.subdomain}</span></p>
-              <p>API Key: <span className="font-mono">{s.apiKeyMasked}</span></p>
               <p>Last Sync: {s.lastSync ? new Date(s.lastSync).toLocaleString() : 'Never'}</p>
+              <p className="pt-1">
+                <Link href="/settings/config" className="text-blue-600 hover:underline">
+                  Edit credentials in Config →
+                </Link>
+              </p>
             </div>
           ) : (
-            <p className="text-red-600 text-sm">Not configured — set SYNCRO_API_KEY and SYNCRO_SUBDOMAIN in backend .env</p>
+            <p className="text-red-600 text-sm">
+              Not configured —{' '}
+              <Link href="/settings/config" className="text-blue-600 hover:underline">
+                set Syncro API credentials in Config →
+              </Link>
+            </p>
           )}
-        </div>
-
-        {/* Entra */}
-        <div className="bg-white rounded border p-4 mb-4">
-          <h2 className="font-semibold mb-3">Entra ID (Azure AD)</h2>
-          {e?.configured ? (
-            <div className="text-sm space-y-1">
-              <p className="text-green-600">✓ Configured</p>
-              <p>Client ID: <span className="font-mono">{e.clientId}</span></p>
-              <p>Tenant ID: <span className="font-mono">{e.tenantId}</span></p>
-            </div>
-          ) : (
-            <p className="text-red-600 text-sm">Not configured — set AZURE_CLIENT_ID and AZURE_TENANT_ID in frontend .env.local</p>
-          )}
-        </div>
-
-        {/* URLs */}
-        <div className="bg-white rounded border p-4 mb-4">
-          <h2 className="font-semibold mb-3">URLs</h2>
-          <div className="text-sm space-y-1">
-            <p>NEXTAUTH_URL: <span className="font-mono">{u?.nextAuth || '—'}</span></p>
-            <p>API URL: <span className="font-mono">{u?.api || '—'}</span></p>
-          </div>
-        </div>
+        </CollapsibleSection>
 
         {/* Scheduler */}
         {s?.configured && (
-          <SchedulerSection />
+          <SchedulerSection visiblePhases={visiblePhases} />
         )}
 
         {/* Sync Data */}
         {s?.configured && (
-          <div className="bg-white rounded border p-4">
-            <h2 className="font-semibold mb-4">Sync Data</h2>
-
+          <CollapsibleSection
+            title="Sync Data"
+            containerClassName="bg-white rounded border p-4 border-t-0"
+            bodyClassName="mt-3"
+            headerClassName="w-full flex justify-between items-center text-left -mt-1 mb-3"
+            defaultOpen
+          >
             {/* Active sync tabs */}
             {anySyncing && (
               <div className="flex items-center gap-2 mb-4 pb-3 border-b overflow-x-auto">
@@ -932,13 +931,13 @@ export default function SyncroPage() {
 
             {/* Individual entity sync rows */}
             <div className="grid grid-cols-1 gap-2 mb-4">
-              {ENTITY_PHASES.map(phase => {
+              {visiblePhases.map(phase => {
                 const syncing = !!activeSyncs[`entity:${phase}`];
                 const progress = entityStatus[phase] || syncAllProgress[phase];
                 const isRunning = syncing;
 
                 return (
-                  <div key={phase} className="flex items-center gap-2">
+                  <div key={phase} className="flex flex-wrap items-center gap-2">
                     <span className={`text-sm w-4 text-center ${phaseColor(progress)}`}>
                       {phaseIcon(progress)}
                     </span>
@@ -961,6 +960,75 @@ export default function SyncroPage() {
                     >
                       Re-sync
                     </button>
+                    {phase === 'appointments' && (
+                      <div className="relative ml-auto" ref={showDatePanel ? datePanelRef : undefined}>
+                        <button
+                          type="button"
+                          onClick={() => setShowDatePanel(o => !o)}
+                          className={`px-2 py-1 rounded text-xs border ${dateFrom || dateTo
+                            ? 'bg-blue-50 border-blue-300 text-blue-700'
+                            : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                          }`}
+                          title="Filter by appointment date range"
+                        >
+                          📅 {(dateFrom || dateTo)
+                            ? `${dateFrom || '…'} → ${dateTo || '…'}`
+                            : 'Date range'}
+                        </button>
+                        {showDatePanel && (
+                          <div className="absolute z-20 top-full right-0 mt-1 bg-white border rounded shadow-lg p-3 flex flex-col gap-2 text-xs" style={{ minWidth: 220 }}>
+                            <div className="flex items-center justify-between">
+                              <span className="font-medium text-gray-700">Appointment date range</span>
+                              <button
+                                type="button"
+                                onClick={() => setShowDatePanel(false)}
+                                className="text-gray-400 hover:text-gray-600"
+                                title="Close"
+                              >×</button>
+                            </div>
+                            <label className="flex items-center gap-2">
+                              <span className="text-gray-500 w-8">From</span>
+                              <input
+                                type="date"
+                                value={dateFrom}
+                                onChange={e => setDateFrom(e.target.value)}
+                                className="px-1.5 py-1 border rounded font-mono text-xs flex-1"
+                              />
+                            </label>
+                            <label className="flex items-center gap-2">
+                              <span className="text-gray-500 w-8">To</span>
+                              <input
+                                type="date"
+                                value={dateTo}
+                                onChange={e => setDateTo(e.target.value)}
+                                className="px-1.5 py-1 border rounded font-mono text-xs flex-1"
+                              />
+                            </label>
+                            <div className="flex justify-between gap-2 mt-1">
+                              <button
+                                type="button"
+                                onClick={() => { setDateFrom(''); setDateTo(''); }}
+                                disabled={!dateFrom && !dateTo}
+                                className="text-gray-500 hover:text-gray-700 underline disabled:opacity-30 disabled:no-underline"
+                              >
+                                Reset to default
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setShowDatePanel(false)}
+                                className="bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700"
+                              >
+                                Done
+                              </button>
+                            </div>
+                            <p className="text-gray-400 text-[10px] leading-tight">
+                              Empty = 10y back / 2y forward (full history).
+                              Applies to appointments sync only.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {progress?.status === 'started' && (
                       <span className="text-xs text-blue-600">{progress.message}</span>
                     )}
@@ -1079,7 +1147,7 @@ export default function SyncroPage() {
                 </div>
               )}
             </div>
-          </div>
+          </CollapsibleSection>
         )}
       </div>
 

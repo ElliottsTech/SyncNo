@@ -9,14 +9,14 @@ import { usePageTitle } from '../../../lib/usePageTitle';
 
 const API = '/api';
 
-type Tab = 'overview' | 'tickets' | 'assets' | 'invoices' | 'estimates' | 'payments' | 'contacts';
+type Tab = 'overview' | 'tickets' | 'assets' | 'invoices' | 'estimates' | 'payments' | 'contacts' | 'schedules';
 
 export default function CustomerDetail() {
   const { id } = useParams();
   const searchParams = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
-  const VALID_TABS: Tab[] = ['overview', 'tickets', 'assets', 'invoices', 'estimates', 'payments', 'contacts'];
+  const VALID_TABS: Tab[] = ['overview', 'tickets', 'assets', 'invoices', 'estimates', 'payments', 'contacts', 'schedules'];
   const initialTab = searchParams.get('tab') as Tab;
   const [customer, setCustomer] = useState<any>(null);
   const [tab, setTab] = useState<Tab>(VALID_TABS.includes(initialTab) ? initialTab : 'overview');
@@ -35,6 +35,7 @@ export default function CustomerDetail() {
   const [estimates, setEstimates] = useState<any[]>([]);
   const [payments, setPayments] = useState<any[]>([]);
   const [contacts, setContacts] = useState<any[]>([]);
+  const [schedules, setSchedules] = useState<any[]>([]);
   const [loaded, setLoaded] = useState(false);
 
   // Load all data in parallel on mount
@@ -47,7 +48,8 @@ export default function CustomerDetail() {
       fetch(`${API}/customers/${id}/estimates`).then(r => r.json()),
       fetch(`${API}/customers/${id}/payments`).then(r => r.json()),
       fetch(`${API}/customers/${id}/contacts`).then(r => r.json()),
-    ]).then(([cust, tkt, ast, inv, est, pay, con]) => {
+      fetch(`${API}/customers/${id}/schedules`).then(r => r.json()),
+    ]).then(([cust, tkt, ast, inv, est, pay, con, sch]) => {
       setCustomer(cust);
       setTickets(tkt.data || []);
       setAssets(ast);
@@ -55,6 +57,7 @@ export default function CustomerDetail() {
       setEstimates(est);
       setPayments(pay);
       setContacts(con);
+      setSchedules(sch);
       setLoaded(true);
     });
   }, [id]);
@@ -74,6 +77,7 @@ export default function CustomerDetail() {
     { key: 'invoices', label: tabLabel('invoices', 'Invoices', invoices.length) },
     { key: 'estimates', label: tabLabel('estimates', 'Estimates', estimates.length) },
     { key: 'payments', label: tabLabel('payments', 'Payments', payments.length) },
+    { key: 'schedules', label: tabLabel('schedules', 'Schedules', schedules.length) },
     { key: 'contacts', label: tabLabel('contacts', 'Contacts', contacts.length) },
   ];
 
@@ -224,6 +228,24 @@ export default function CustomerDetail() {
           ]}
           data={contacts}
           emptyMessage="No contacts"
+        />
+      )}
+
+      {tab === 'schedules' && (
+        <DataTable
+          columns={[
+            {
+              key: 'name', label: 'Name',
+              render: (v, r) => <Link href={`/schedules/${r.id}`} className="text-blue-600 hover:underline">{v || '(no name)'}</Link>,
+            },
+            { key: 'status', label: 'Status', render: v => v ? <Badge>{v}</Badge> : '' },
+            { key: 'amount', label: 'Amount', render: v => v ? `$${parseFloat(v).toFixed(2)}` : '—' },
+            { key: 'frequency', label: 'Frequency' },
+            { key: 'next_date', label: 'Next', render: v => v ? new Date(v).toLocaleDateString() : '' },
+            { key: 'end_date', label: 'Ends', render: v => v ? new Date(v).toLocaleDateString() : '' },
+          ]}
+          data={schedules}
+          emptyMessage="No schedules"
         />
       )}
 

@@ -5,43 +5,19 @@ import Link from 'next/link';
 import Badge from '../../../components/Badge';
 import DataTable from '../../../components/DataTable';
 import RawJsonView from '../../../components/RawJsonView';
+import CollapsibleSection from '../../../components/CollapsibleSection';
 import { usePageTitle } from '../../../lib/usePageTitle';
 
 const API = '/api';
 
-function CollapsibleSection({ title, count, children }: { title: string; count?: number; children: React.ReactNode }) {
-  const [open, setOpen] = useState(true);
-  return (
-    <div className="border-t">
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex justify-between items-center p-4 hover:bg-gray-50 text-left"
-      >
-        <h2 className="font-semibold">
-          {title}
-          {count !== undefined && count > 0 && (
-            <span className="ml-2 text-sm text-gray-500">({count})</span>
-          )}
-        </h2>
-        <span className="text-gray-400">{open ? '▲' : '▼'}</span>
-      </button>
-      {open && <div className="p-4 pt-0">{children}</div>}
-    </div>
-  );
-}
-
 export default function ProductDetail() {
   const { id } = useParams();
   const [product, setProduct] = useState<any>(null);
-  const [tickets, setTickets] = useState<any[]>([]);
 
   useEffect(() => {
     fetch(`${API}/products/${id}`)
       .then(r => r.json())
       .then(setProduct);
-    fetch(`${API}/products/${id}/tickets`)
-      .then(r => r.json())
-      .then(setTickets);
   }, [id]);
 
   usePageTitle(product ? `${product.name || 'Product'} — Syncno` : null);
@@ -65,6 +41,14 @@ export default function ProductDetail() {
     const raw = typeof product.vendor_ids === 'string' ? JSON.parse(product.vendor_ids) : product.vendor_ids;
     if (Array.isArray(raw)) vendorIds = raw;
   } catch (_) {}
+
+  const linked = product.linked || { tickets: [], invoices: [], estimates: [], purchase_orders: [] };
+  const usageTotal = (product.usage?.tickets || 0) + (product.usage?.invoices || 0) +
+    (product.usage?.estimates || 0) + (product.usage?.purchase_orders || 0);
+
+  function scrollTo(id: string) {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -140,23 +124,27 @@ export default function ProductDetail() {
         </div>
 
         {/* Usage summary */}
-        {product.usage && (product.usage.tickets + product.usage.invoices + product.usage.estimates + product.usage.purchase_orders) > 0 && (
+        {usageTotal > 0 && (
           <div className="p-6 border-t">
             <h3 className="font-semibold mb-3">Usage</h3>
-            <div className="flex flex-wrap gap-4 text-sm">
-              <Link href="#" onClick={(e) => { e.preventDefault(); document.getElementById('tickets-section')?.scrollIntoView({ behavior: 'smooth' }); }}
-                className="px-3 py-2 rounded border border-gray-200 hover:bg-gray-50">
-                <span className="text-gray-500">Tickets:</span> <span className="font-semibold">{product.usage.tickets}</span>
-              </Link>
-              <div className="px-3 py-2 rounded border border-gray-200">
-                <span className="text-gray-500">Invoices:</span> <span className="font-semibold">{product.usage.invoices}</span>
-              </div>
-              <div className="px-3 py-2 rounded border border-gray-200">
-                <span className="text-gray-500">Estimates:</span> <span className="font-semibold">{product.usage.estimates}</span>
-              </div>
-              <div className="px-3 py-2 rounded border border-gray-200">
-                <span className="text-gray-500">Purchase Orders:</span> <span className="font-semibold">{product.usage.purchase_orders}</span>
-              </div>
+            <div className="flex flex-wrap gap-3 text-sm">
+              {[
+                { label: 'Tickets', count: product.usage.tickets, anchor: 'tickets-section' },
+                { label: 'Invoices', count: product.usage.invoices, anchor: 'invoices-section' },
+                { label: 'Estimates', count: product.usage.estimates, anchor: 'estimates-section' },
+                { label: 'Purchase Orders', count: product.usage.purchase_orders, anchor: 'pos-section' },
+              ].map(card => (
+                <button
+                  key={card.anchor}
+                  type="button"
+                  onClick={() => scrollTo(card.anchor)}
+                  disabled={card.count === 0}
+                  className={`px-3 py-2 rounded border text-left ${card.count > 0 ? 'border-gray-200 hover:bg-gray-50 hover:border-blue-300 cursor-pointer' : 'border-gray-100 text-gray-400 cursor-default'}`}
+                >
+                  <span className="text-gray-500">{card.label}:</span>{' '}
+                  <span className="font-semibold">{card.count}</span>
+                </button>
+              ))}
             </div>
           </div>
         )}
@@ -175,32 +163,124 @@ export default function ProductDetail() {
           </div>
         )}
 
-        <CollapsibleSection title="Linked Tickets" count={tickets.length}>
-          {tickets.length > 0 ? (
-            <div className="space-y-2">
-              {tickets.map((t: any) => (
-                <Link
-                  key={t.id}
-                  href={`/tickets/${t.id}`}
-                  className="flex items-center justify-between gap-2 text-sm px-3 py-2 rounded border border-gray-200 hover:bg-gray-50"
-                >
-                  <span className="flex items-center gap-3">
-                    <span className="font-mono">#{t.number}</span>
-                    <span className="text-gray-700">{t.subject}</span>
-                  </span>
-                  <span className="flex items-center gap-3">
-                    {t.customer_business_then_name && <span className="text-gray-500">{t.customer_business_then_name}</span>}
-                    {t.status && <Badge variant={t.status === 'Resolved' ? 'success' : 'default'}>{t.status}</Badge>}
-                  </span>
-                </Link>
-              ))}
-            </div>
-          ) : (
-            <p className="text-gray-500 text-sm">No tickets reference this product</p>
-          )}
+        <CollapsibleSection title="Linked Tickets" count={linked.tickets.length} defaultOpen={linked.tickets.length > 0}>
+          <div id="tickets-section">
+            {linked.tickets.length > 0 ? (
+              <div className="space-y-2">
+                {linked.tickets.map((t: any) => (
+                  <Link
+                    key={t.id}
+                    href={`/tickets/${t.id}`}
+                    className="flex items-center justify-between gap-2 text-sm px-3 py-2 rounded border border-gray-200 hover:bg-gray-50"
+                  >
+                    <span className="flex items-center gap-3">
+                      <span className="font-mono">#{t.number}</span>
+                      <span className="text-gray-700">{t.subject}</span>
+                    </span>
+                    <span className="flex items-center gap-3">
+                      {t.customer_business_then_name && <span className="text-gray-500">{t.customer_business_then_name}</span>}
+                      {t.status && <Badge variant={t.status === 'Resolved' ? 'success' : 'default'}>{t.status}</Badge>}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500 text-sm">No tickets reference this product</p>
+            )}
+          </div>
         </CollapsibleSection>
 
-        <CollapsibleSection title="Serials" count={product.serials?.length || 0}>
+        <CollapsibleSection title="Linked Invoices" count={linked.invoices.length} defaultOpen={linked.invoices.length > 0}>
+          <div id="invoices-section">
+            {linked.invoices.length > 0 ? (
+              <div className="space-y-2">
+                {linked.invoices.map((inv: any) => (
+                  <Link
+                    key={inv.id}
+                    href={`/invoices/${inv.id}`}
+                    className="flex items-center justify-between gap-2 text-sm px-3 py-2 rounded border border-gray-200 hover:bg-gray-50"
+                  >
+                    <span className="flex items-center gap-3">
+                      <span className="font-mono">#{inv.number}</span>
+                      <span className="text-gray-700">{inv.customer_business_then_name || '—'}</span>
+                    </span>
+                    <span className="flex items-center gap-3">
+                      {inv.date && <span className="text-gray-500">{new Date(inv.date).toLocaleDateString()}</span>}
+                      {inv.total && <span className="font-medium">${parseFloat(inv.total).toFixed(2)}</span>}
+                      {inv.is_paid ? <Badge variant="success">PAID</Badge>
+                        : inv.verified_paid ? <Badge variant="info">VERIFIED</Badge>
+                        : <Badge variant="warning">UNPAID</Badge>}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500 text-sm">No invoices reference this product</p>
+            )}
+          </div>
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Linked Estimates" count={linked.estimates.length} defaultOpen={linked.estimates.length > 0}>
+          <div id="estimates-section">
+            {linked.estimates.length > 0 ? (
+              <div className="space-y-2">
+                {linked.estimates.map((est: any) => (
+                  <Link
+                    key={est.id}
+                    href={`/estimates/${est.id}`}
+                    className="flex items-center justify-between gap-2 text-sm px-3 py-2 rounded border border-gray-200 hover:bg-gray-50"
+                  >
+                    <span className="flex items-center gap-3">
+                      <span className="font-mono">#{est.number}</span>
+                      {est.status && <Badge>{est.status}</Badge>}
+                    </span>
+                    <span className="flex items-center gap-3">
+                      {est.customer_business_then_name && <span className="text-gray-500">{est.customer_business_then_name}</span>}
+                      {est.date && <span className="text-gray-500">{new Date(est.date).toLocaleDateString()}</span>}
+                      {est.total && <span className="font-medium">${parseFloat(est.total).toFixed(2)}</span>}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500 text-sm">No estimates reference this product</p>
+            )}
+          </div>
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Linked Purchase Orders" count={linked.purchase_orders.length} defaultOpen={linked.purchase_orders.length > 0}>
+          <div id="pos-section">
+            {linked.purchase_orders.length > 0 ? (
+              <div className="space-y-2">
+                {linked.purchase_orders.map((po: any) => (
+                  <Link
+                    key={po.id}
+                    href={`/purchase-orders/${po.id}`}
+                    className="flex items-center justify-between gap-2 text-sm px-3 py-2 rounded border border-gray-200 hover:bg-gray-50"
+                  >
+                    <span className="flex items-center gap-3">
+                      <span className="font-mono">#{po.number}</span>
+                      {po.status && <Badge>{po.status}</Badge>}
+                    </span>
+                    <span className="flex items-center gap-3">
+                      {po.vendor_name && (
+                        po.vendor_id
+                          ? <Link href={`/vendors/${po.vendor_id}`} onClick={e => e.stopPropagation()} className="text-gray-500 hover:underline">{po.vendor_name}</Link>
+                          : <span className="text-gray-500">{po.vendor_name}</span>
+                      )}
+                      {po.created_at && <span className="text-gray-500">{new Date(po.created_at).toLocaleDateString()}</span>}
+                      {po.total && <span className="font-medium">${parseFloat(po.total).toFixed(2)}</span>}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500 text-sm">No purchase orders reference this product</p>
+            )}
+          </div>
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Serials" count={product.serials?.length || 0} defaultOpen={(product.serials?.length || 0) > 0}>
           {product.serials && product.serials.length > 0 ? (
             <DataTable
               columns={[
@@ -219,7 +299,7 @@ export default function ProductDetail() {
           )}
         </CollapsibleSection>
 
-        <CollapsibleSection title="SKUs" count={product.skus?.length || 0}>
+        <CollapsibleSection title="SKUs" count={product.skus?.length || 0} defaultOpen={(product.skus?.length || 0) > 0}>
           {product.skus && product.skus.length > 0 ? (
             <DataTable
               columns={[

@@ -12,10 +12,22 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// Restrict to internal service callers (NextAuth callbacks, future MCP server)
+// presenting the shared SYNCNO_API_KEY bearer token. Browser cookie auth is
+// intentionally rejected — these routes are not user-facing.
+// Read process.env lazily — module load runs before index.js loads .env.
+function requireService(req, res, next) {
+  const auth = req.headers.authorization;
+  if (auth && auth.startsWith('Bearer ') && auth.slice(7) === process.env.SYNCNO_API_KEY) {
+    return next();
+  }
+  return res.status(403).json({ error: 'Service only' });
+}
+
 // POST /api/users/upsert - create or update user (called by auth flow).
 // Role is never overwritten on update so admin changes persist across logins.
 // First user ever to log in is auto-promoted to admin.
-router.post('/upsert', (req, res) => {
+router.post('/upsert', requireService, (req, res) => {
   const db = getDb();
   const { id, email, name } = req.body;
   if (!id || !email) return res.status(400).json({ error: 'id and email required' });
@@ -41,8 +53,8 @@ router.post('/upsert', (req, res) => {
 });
 
 // GET /api/users/:id/role - role lookup for JWT callback.
-// Must stay public so the auth flow can read role during sign-in.
-router.get('/:id/role', (req, res) => {
+// Service-only: the auth flow calls this with the shared API key.
+router.get('/:id/role', requireService, (req, res) => {
   const db = getDb();
   const row = db.prepare('SELECT role FROM users WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
@@ -80,8 +92,8 @@ router.put('/:id/role', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-// PUT /api/users/:id/last-login - update last login (called by auth flow)
-router.put('/:id/last-login', (req, res) => {
+// PUT /api/users/:id/last-login - update last login (service only)
+router.put('/:id/last-login', requireService, (req, res) => {
   const db = getDb();
   db.prepare(`UPDATE users SET last_login = datetime('now') WHERE id = ?`).run(req.params.id);
   res.json({ ok: true });

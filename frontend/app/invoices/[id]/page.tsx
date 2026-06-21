@@ -4,7 +4,6 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { usePageTitle } from '../../../lib/usePageTitle';
 import Badge from '../../../components/Badge';
-import DataTable from '../../../components/DataTable';
 import RawJsonView from '../../../components/RawJsonView';
 
 const API = '/api';
@@ -12,16 +11,12 @@ const API = '/api';
 export default function InvoiceDetail() {
   const { id } = useParams();
   const [invoice, setInvoice] = useState<any>(null);
-  const [payments, setPayments] = useState<any[]>([]);
   const [linkedTicket, setLinkedTicket] = useState<{ ticket_id: string | null; ticket: any | null } | null>(null);
 
   useEffect(() => {
     fetch(`${API}/invoices/${id}`)
       .then(r => r.json())
       .then(setInvoice);
-    fetch(`${API}/invoices/${id}/payments`)
-      .then(r => r.json())
-      .then(setPayments);
     fetch(`${API}/invoices/${id}/ticket`)
       .then(r => r.json())
       .then(setLinkedTicket);
@@ -129,21 +124,6 @@ export default function InvoiceDetail() {
           </div>
         )}
       </div>
-
-      {payments.length > 0 && (
-        <div className="mt-6">
-          <h2 className="text-lg font-semibold mb-3">Payments</h2>
-          <DataTable
-            columns={[
-              { key: 'payment_amount', label: 'Amount' },
-              { key: 'payment_method', label: 'Method' },
-              { key: 'applied_at', label: 'Date', render: v => v ? new Date(v).toLocaleDateString() : '' },
-              { key: 'ref_num', label: 'Ref #' },
-            ]}
-            data={payments}
-          />
-        </div>
-      )}
 
       {lineItems.length > 0 && (
         <div className="mt-6">
