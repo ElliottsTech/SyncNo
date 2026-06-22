@@ -189,7 +189,7 @@ The sync page (`/syncro`) shows sync status. "Sync" pulls records updated since 
 
 ## Updating SyncNo
 
-Admin sidebar shows the current commit SHA. When `origin/main` moves ahead, a yellow "Update" pill appears with the new SHA.
+Admin sidebar shows the current version. When a newer GitHub tag exists, a yellow "Update" pill appears with the new version + copyable `update.sh` command.
 
 **To update:**
 
@@ -199,11 +199,31 @@ sudo /opt/syncno/scripts/update.sh
 ```
 
 The script:
-1. Verifies clean working tree and responsive Docker daemon
-2. Fetches `origin/main`, fast-forwards
-3. Rebuilds containers (`docker compose build`)
-4. Restarts services (`docker compose up -d`)
-5. Polls `http://localhost:3001/api/health` for up to 90s
+1. Verifies no tracked file modifications and responsive Docker daemon
+2. Auto-discovers repo root from script location (works for any install path)
+3. Fetches `origin/main`, fast-forwards
+4. Rebuilds containers (`docker compose build`)
+5. Restarts services (`docker compose up -d`)
+6. Polls `http://localhost:3001/api/health` for up to 90s
+
+### Per-instance customizations
+
+Use `docker-compose.override.yml` (gitignored) for instance-specific overrides like publishing extra ports or mounting local dirs. Compose auto-merges it on top of the base file, so `git pull` never conflicts.
+
+Example `/opt/syncno/docker-compose.override.yml` to publish the backend port:
+
+```yaml
+services:
+  backend:
+    ports:
+      - "3002:3002"
+```
+
+Set `HOST_INSTALL_DIR` in `.env` so the UI shows the right `update.sh` path:
+
+```
+HOST_INSTALL_DIR=/opt/syncno
+```
 
 **On failure** (build error, restart failure, or health check timeout), the script exits non-zero and prints a rollback block:
 
@@ -222,7 +242,7 @@ Logs: docker compose logs --tail=100
 
 No auto-rollback — admin decides whether to roll back or fix forward.
 
-**Note:** Backend container needs read access to `/opt/syncno/.git` to resolve the current SHA. If git is unavailable inside the container, `update.sh` writes `/opt/syncno/.deploy-sha` on successful update as a fallback.
+**Note:** If git is unavailable inside the container, `update.sh` writes `/opt/syncno/.deploy-sha` on successful update as a fallback SHA source.
 
 ---
 

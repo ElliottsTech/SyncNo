@@ -15,3 +15,5 @@ SyncNo/
 backend/data/json_export/
 .restic-password
 .claude/
+docker-compose.override.yml
+docker-compose.override.yaml
