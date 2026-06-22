@@ -44,3 +44,12 @@ services:
 
 volumes:
   sqlite-data:
+
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      # Match docker0 MTU — ens3 path MTU is 1400 so 1500-byte container
+      # packets get blackhole-dropped on TLS handshake. 1450 lets the kernel
+      # fragment cleanly. Without this, node fetch to external HTTPS hangs.
+      com.docker.network.driver.mtu: "1450"
