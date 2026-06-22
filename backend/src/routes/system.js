@@ -18,13 +18,6 @@ const CACHE_TTL_MS = 30_000;
 
 let cache = null;
 
-function requireAdmin(req, res, next) {
-  if (req.user?.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin only' });
-  }
-  next();
-}
-
 async function readCurrentSha() {
   try {
     const { stdout } = await execFile(
@@ -71,7 +64,8 @@ async function computeVersion() {
 
 // GET /api/system/version - current vs latest SHA for sidebar display.
 // Pass ?refresh=true to bypass cache (e.g. after running update.sh).
-router.get('/version', requireAdmin, async (req, res) => {
+// Any authenticated user may read; admin-gating happens client-side for the update button.
+router.get('/version', async (req, res) => {
   if (req.query.refresh !== 'true' && cache && (Date.now() - cache.fetchedAt) < CACHE_TTL_MS) {
     return res.json(cache.data);
   }

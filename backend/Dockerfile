@@ -14,6 +14,10 @@ RUN npm install
 
 COPY . .
 
+# Bake current commit SHA so /api/system/version works without git in image.
+ARG BUILD_SHA=""
+RUN if [ -n "$BUILD_SHA" ]; then echo "$BUILD_SHA" > .deploy-sha; fi
+
 RUN mkdir -p data
 
 EXPOSE 3002
