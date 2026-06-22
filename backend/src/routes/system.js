@@ -1,77 +1,80 @@
 import { Router } from 'express';
-import { execFile as cbExecFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
-const execFile = promisify(cbExecFile);
-
 const router = Router();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// backend/src/routes/system.js → repo root
 const REPO_DIR = process.env.REPO_DIR || resolve(__dirname, '..', '..', '..');
-const DEPLOY_SHA_FILE = join(REPO_DIR, '.deploy-sha');
-const GIT_TIMEOUT_MS = 10_000;
+const VERSION_FILE = join(REPO_DIR, 'VERSION');
+const GITHUB_REPO = process.env.GITHUB_REPO || 'ElliottsTech/SyncNo';
 const CACHE_TTL_MS = 30_000;
 
 let cache = null;
 
-function requireAdmin(req, res, next) {
-  if (req.user?.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin only' });
-  }
-  next();
+function parseSemver(tag) {
+  if (!tag) return null;
+  const m = String(tag).match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
 }
 
-async function readCurrentSha() {
+function compareSemver(a, b) {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa || !pb) return null;
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+async function readCurrentVersion() {
   try {
-    const { stdout } = await execFile(
-      'git',
-      ['-C', REPO_DIR, 'rev-parse', '--short', 'HEAD'],
-      { timeout: GIT_TIMEOUT_MS }
-    );
-    const sha = stdout.trim();
-    if (sha) return sha;
+    const v = (await readFile(VERSION_FILE, 'utf8')).trim();
+    return v || null;
   } catch (_) {
-    // git unavailable or not a checkout — fall through
+    return null;
   }
-  try {
-    const contents = await readFile(DEPLOY_SHA_FILE, 'utf8');
-    const sha = contents.trim();
-    if (sha) return sha;
-  } catch (_) {}
-  return null;
 }
 
-async function readLatestSha() {
+async function readLatestVersion() {
   try {
-    const { stdout } = await execFile(
-      'git',
-      ['-C', REPO_DIR, 'ls-remote', 'origin', 'refs/heads/main'],
-      { timeout: GIT_TIMEOUT_MS }
+    const r = await fetch(
+      `https://api.github.com/repos/${GITHUB_REPO}/tags`,
+      { headers: { 'User-Agent': 'syncno-version-check' }, signal: AbortSignal.timeout(8000) }
     );
-    const firstLine = stdout.trim().split('\n')[0];
-    const fullSha = firstLine.split(/\s+/)[0];
-    return fullSha ? fullSha.slice(0, 7) : null;
+    if (!r.ok) return null;
+    const tags = await r.json();
+    if (!Array.isArray(tags) || tags.length === 0) return null;
+    // Tags may be ordered by commit date, not semver. Pick highest semver.
+    let best = null;
+    for (const t of tags) {
+      const name = t?.name;
+      if (!name || !parseSemver(name)) continue;
+      if (best === null || compareSemver(name, best) > 0) best = name.replace(/^v/, '');
+    }
+    return best;
   } catch (_) {
     return null;
   }
 }
 
 async function computeVersion() {
-  const [current, latest] = await Promise.all([readCurrentSha(), readLatestSha()]);
-  return {
-    current,
-    latest,
-    updateAvailable: current && latest ? current !== latest : null,
-  };
+  const [current, latest] = await Promise.all([readCurrentVersion(), readLatestVersion()]);
+  let updateAvailable = null;
+  if (current && latest) {
+    const cmp = compareSemver(current, latest);
+    updateAvailable = cmp === null ? null : cmp < 0;
+  }
+  return { current, latest, updateAvailable };
 }
 
-// GET /api/system/version - current vs latest SHA for sidebar display.
+// GET /api/system/version - current vs latest tag for sidebar display.
 // Pass ?refresh=true to bypass cache (e.g. after running update.sh).
-router.get('/version', requireAdmin, async (req, res) => {
+// Any authenticated user may read; admin-gating happens client-side for the update button.
+router.get('/version', async (req, res) => {
   if (req.query.refresh !== 'true' && cache && (Date.now() - cache.fetchedAt) < CACHE_TTL_MS) {
     return res.json(cache.data);
   }

@@ -94,7 +94,6 @@ export default function Sidebar() {
   }, []);
 
   useEffect(() => {
-    if (!isAdmin) return;
     let cancelled = false;
     const fetchVersion = () => {
       fetch('/api/system/version')
@@ -105,7 +104,7 @@ export default function Sidebar() {
     fetchVersion();
     const id = setInterval(fetchVersion, 5 * 60 * 1000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [isAdmin]);
+  }, []);
 
   const copyUpdateCommand = () => {
     const cmd = 'sudo /opt/syncno/scripts/update.sh';
@@ -146,9 +145,9 @@ export default function Sidebar() {
         ))}
       </nav>
       <div className="mt-4 pt-4 border-t border-gray-700">
-        {isAdmin && version?.current && (
+        {version?.current && (
           <div className="px-3 py-2 mb-2">
-            {version.updateAvailable ? (
+            {isAdmin && version.updateAvailable ? (
               <>
                 <div className="flex items-center gap-2 text-xs">
                   <span className="text-gray-400">

@@ -17,12 +17,27 @@ type Status = {
   urls: UrlStatus;
 };
 
+type Credentials = {
+  syncro: {
+    apiKey: string | null;
+    subdomain: string | null;
+    apiKeyMasked: string | null;
+  };
+  entra: {
+    clientId: string | null;
+    clientSecret: string | null;
+    tenantId: string | null;
+    clientSecretMasked: string | null;
+  };
+};
+
 export default function ConfigPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
   usePageTitle('Config — SyncNo');
 
   const [statusData, setStatusData] = useState<Status | null>(null);
+  const [creds, setCreds] = useState<Credentials | null>(null);
   const [syncroForm, setSyncroForm] = useState({ apiKey: '', subdomain: '' });
   const [entraForm, setEntraForm] = useState({ clientId: '', clientSecret: '', tenantId: '' });
   const [saving, setSaving] = useState<string | null>(null);
@@ -36,6 +51,7 @@ export default function ConfigPage() {
     }
     if (status !== 'authenticated') return;
     refresh();
+    refreshCreds();
   }, [status, session, router]);
 
   const refresh = async () => {
@@ -47,6 +63,24 @@ export default function ConfigPage() {
     } catch (e: any) {
       setError(e.message);
     }
+  };
+
+  const refreshCreds = async () => {
+    try {
+      const r = await fetch(`${API}/sync/credentials`);
+      if (!r.ok) return;
+      const d = await r.json();
+      setCreds(d);
+      setSyncroForm({
+        apiKey: d.syncro.apiKey || '',
+        subdomain: d.syncro.subdomain || '',
+      });
+      setEntraForm({
+        clientId: d.entra.clientId || '',
+        clientSecret: d.entra.clientSecret || '',
+        tenantId: d.entra.tenantId || '',
+      });
+    } catch (_) {}
   };
 
   const saveSyncro = async () => {
@@ -65,9 +99,9 @@ export default function ConfigPage() {
         const d = await r.json().catch(() => ({}));
         throw new Error(d.error || `HTTP ${r.status}`);
       }
-      setSyncroForm({ apiKey: '', subdomain: '' });
       setNotice('Syncro credentials saved.');
       refresh();
+      refreshCreds();
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -91,9 +125,9 @@ export default function ConfigPage() {
         const d = await r.json().catch(() => ({}));
         throw new Error(d.error || `HTTP ${r.status}`);
       }
-      setEntraForm({ clientId: '', clientSecret: '', tenantId: '' });
-      setNotice('Entra ID credentials saved. Frontend restart required to pick up new env values.');
+      setNotice('Entra ID credentials saved. Frontend restart required for Next.js to pick up new env values.');
       refresh();
+      refreshCreds();
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -113,9 +147,9 @@ export default function ConfigPage() {
     <div className="p-6 max-w-3xl mx-auto">
       <h1 className="text-2xl font-bold mb-4">Configuration</h1>
       <p className="text-sm text-gray-600 mb-6">
-        API keys, credentials, and URLs. Changes write to backend <code>.env</code> / frontend{' '}
-        <code>.env.local</code>. Backend picks up Syncro creds immediately; Azure changes require a
-        frontend restart.
+        Fields are pre-populated from <code>.env</code>. Sensitive values (API key, client secret)
+        are masked in the UI. Edit a field and save to write the new value back to{' '}
+        <code>.env</code> (and <code>frontend/.env.local</code> for Entra).
       </p>
 
       {error && (
@@ -162,6 +196,7 @@ export default function ConfigPage() {
             value={syncroForm.apiKey}
             onChange={v => setSyncroForm({ ...syncroForm, apiKey: v })}
             placeholder="Syncro API key"
+            hint={creds?.syncro.apiKeyMasked ? `Current: <code>${creds.syncro.apiKeyMasked}</code>` : undefined}
           />
           <button
             onClick={saveSyncro}
@@ -198,7 +233,8 @@ export default function ConfigPage() {
             type="password"
             value={entraForm.clientSecret}
             onChange={v => setEntraForm({ ...entraForm, clientSecret: v })}
-            placeholder="Leave blank to keep existing"
+            placeholder="Azure app registration client_secret"
+            hint={creds?.entra.clientSecretMasked ? `Current: <code>${creds.entra.clientSecretMasked}</code>` : 'Leave blank to keep existing'}
           />
           <Field
             label="Tenant ID"
