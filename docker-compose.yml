@@ -10,7 +10,7 @@ services:
     volumes:
       - sqlite-data:/app/data
       - /root/SyncNo/SyncNo:/root/SyncNo/SyncNo:ro
-      - ./.env:/app/.env:ro
+      - ./.env:/app/.env
       - ./VERSION:/app/VERSION:ro
     environment:
       REPO_DIR: /app

@@ -160,6 +160,36 @@ function setSetting(key, value) {
   db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
 }
 
+function mask(value) {
+  if (!value) return null;
+  const len = value.length;
+  if (len <= 8) return '•'.repeat(len);
+  return value.slice(0, 4) + '•'.repeat(Math.min(len - 8, 20)) + value.slice(-4);
+}
+
+function updateEnvFile(envPath, updates) {
+  let content = '';
+  if (fs.existsSync(envPath)) {
+    content = fs.readFileSync(envPath, 'utf8');
+  }
+  const lines = content.split('\n');
+  const seen = new Set();
+  const updated = lines.map(line => {
+    for (const [key, val] of Object.entries(updates)) {
+      const prefix = `${key}=`;
+      if (line.startsWith(prefix)) {
+        seen.add(key);
+        return val == null ? line : `${prefix}${val}`;
+      }
+    }
+    return line;
+  });
+  for (const [key, val] of Object.entries(updates)) {
+    if (!seen.has(key) && val != null) updated.push(`${key}=${val}`);
+  }
+  fs.writeFileSync(envPath, updated.join('\n').replace(/\n+$/, '\n') + '\n');
+}
+
 // ─── Sync state helpers ───────────────────────────────────────────────────────
 
 function getSyncState(entity) {
@@ -357,24 +387,48 @@ router.get('/events', (req, res) => {
 
 // ─── API: Save credentials ─────────────────────────────────────────────────────
 
+// GET /api/sync/credentials — admin-only. Returns actual env values so the
+// config UI can pre-populate fields. Sensitive fields (API key, client secret)
+// are masked so they render as •••• but the input value is the real secret.
+router.get('/credentials', requireAdmin, (req, res) => {
+  const apiKey = getSetting('syncro_api_key');
+  const subdomain = getSetting('syncro_subdomain');
+  const clientSecret = process.env.AZURE_CLIENT_SECRET;
+  res.json({
+    syncro: {
+      apiKey,
+      subdomain,
+      apiKeyMasked: mask(apiKey),
+    },
+    entra: {
+      clientId: process.env.AZURE_CLIENT_ID || null,
+      tenantId: process.env.AZURE_TENANT_ID || null,
+      clientSecret,
+      clientSecretMasked: mask(clientSecret),
+    },
+  });
+});
+
 router.post('/save', requireAdmin, (req, res) => {
   const { apiKey, subdomain } = req.body;
-  if (!apiKey || !subdomain) {
+  const existingKey = getSetting('syncro_api_key');
+  const existingSub = getSetting('syncro_subdomain');
+  const finalKey = apiKey || existingKey;
+  const finalSub = subdomain || existingSub;
+  if (!finalKey || !finalSub) {
     return res.status(400).json({ error: 'apiKey and subdomain required' });
   }
-  setSetting('syncro_api_key', apiKey);
-  setSetting('syncro_subdomain', subdomain);
+  setSetting('syncro_api_key', finalKey);
+  setSetting('syncro_subdomain', finalSub);
+  process.env.SYNCRO_API_KEY = finalKey;
+  process.env.SYNCRO_SUBDOMAIN = finalSub;
 
   try {
     const envPath = path.resolve(process.cwd(), '.env');
-    let envContent = fs.readFileSync(envPath, 'utf8');
-    const lines = envContent.split('\n');
-    const updated = lines.map(line => {
-      if (line.startsWith('SYNCRO_API_KEY=')) return `SYNCRO_API_KEY=${apiKey}`;
-      if (line.startsWith('SYNCRO_SUBDOMAIN=')) return `SYNCRO_SUBDOMAIN=${subdomain}`;
-      return line;
-    }).join('\n');
-    fs.writeFileSync(envPath, updated);
+    updateEnvFile(envPath, {
+      SYNCRO_API_KEY: finalKey,
+      SYNCRO_SUBDOMAIN: finalSub,
+    });
   } catch (e) {
     console.error('Failed to write .env:', e.message);
   }
@@ -382,37 +436,35 @@ router.post('/save', requireAdmin, (req, res) => {
   res.json({ success: true });
 });
 
-// POST /api/sync/save-azure — write Entra ID (Azure AD) app creds to
-// frontend/.env.local. AZURE_CLIENT_SECRET is sensitive — never returned by
-// /status. Path resolved relative to backend cwd → ../frontend/.env.local.
+// POST /api/sync/save-azure — write Entra ID (Azure AD) app creds to both the
+// shared .env (backend cwd) and frontend/.env.local so Next.js picks them up
+// too. Empty fields inherit the existing value rather than overwriting with
+// blank. AZURE_CLIENT_SECRET is sensitive — /credentials masks it for display.
 router.post('/save-azure', requireAdmin, (req, res) => {
   const { clientId, clientSecret, tenantId } = req.body;
-  if (!clientId || !tenantId) {
+  const finalClientId = clientId || process.env.AZURE_CLIENT_ID;
+  const finalTenantId = tenantId || process.env.AZURE_TENANT_ID;
+  const finalClientSecret = clientSecret || process.env.AZURE_CLIENT_SECRET;
+  if (!finalClientId || !finalTenantId) {
     return res.status(400).json({ error: 'clientId and tenantId required' });
   }
-  const envPath = path.resolve(process.cwd(), '..', 'frontend', '.env.local');
-  let content = '';
-  if (fs.existsSync(envPath)) {
-    content = fs.readFileSync(envPath, 'utf8');
-  }
-  const lines = content.split('\n');
-  const seen = new Set();
-  const updated = lines.map(line => {
-    if (line.startsWith('AZURE_CLIENT_ID=')) { seen.add('AZURE_CLIENT_ID'); return `AZURE_CLIENT_ID=${clientId}`; }
-    if (line.startsWith('AZURE_TENANT_ID=')) { seen.add('AZURE_TENANT_ID'); return `AZURE_TENANT_ID=${tenantId}`; }
-    if (line.startsWith('AZURE_CLIENT_SECRET=')) {
-      seen.add('AZURE_CLIENT_SECRET');
-      return clientSecret ? `AZURE_CLIENT_SECRET=${clientSecret}` : line;
-    }
-    return line;
-  }).filter(line => line.trim() !== '' || true);
-  if (!seen.has('AZURE_CLIENT_ID')) updated.push(`AZURE_CLIENT_ID=${clientId}`);
-  if (!seen.has('AZURE_TENANT_ID')) updated.push(`AZURE_TENANT_ID=${tenantId}`);
-  if (clientSecret && !seen.has('AZURE_CLIENT_SECRET')) updated.push(`AZURE_CLIENT_SECRET=${clientSecret}`);
+  process.env.AZURE_CLIENT_ID = finalClientId;
+  process.env.AZURE_TENANT_ID = finalTenantId;
+  if (finalClientSecret) process.env.AZURE_CLIENT_SECRET = finalClientSecret;
+
+  const updates = {
+    AZURE_CLIENT_ID: finalClientId,
+    AZURE_TENANT_ID: finalTenantId,
+  };
+  if (finalClientSecret) updates.AZURE_CLIENT_SECRET = finalClientSecret;
+
+  const mainEnv = path.resolve(process.cwd(), '.env');
+  const feEnvLocal = path.resolve(process.cwd(), '..', 'frontend', '.env.local');
   try {
-    fs.writeFileSync(envPath, updated.join('\n') + '\n');
+    if (fs.existsSync(mainEnv)) updateEnvFile(mainEnv, updates);
+    updateEnvFile(feEnvLocal, updates);
   } catch (e) {
-    return res.status(500).json({ error: `Failed to write frontend/.env.local: ${e.message}` });
+    return res.status(500).json({ error: `Failed to write env files: ${e.message}` });
   }
   res.json({ success: true });
 });
