@@ -5,9 +5,9 @@
 # health-checks. On failure, prints manual rollback instructions including
 # the previous SHA. Does NOT auto-rollback — admin decides.
 #
-# Usage: sudo REPO_DIR=/opt/syncno ./scripts/update.sh
+# Usage: sudo ./scripts/update.sh
 # Env:
-#   REPO_DIR                Repo checkout (default /opt/syncno)
+#   REPO_DIR                Repo checkout (default: auto-discovered from script location's parent)
 #   HEALTH_URL              Health endpoint (default http://localhost:3001/api/health)
 #   HEALTH_TIMEOUT_SEC      How long to wait post-restart (default 90)
 #   HEALTH_POLL_INTERVAL_SEC  Poll cadence (default 2)
@@ -15,7 +15,14 @@
 
 set -euo pipefail
 
-REPO_DIR="${REPO_DIR:-/opt/syncno}"
+# Auto-discover repo root from script path so the script works regardless of
+# where SyncNo is cloned (e.g. /opt/syncno, /opt/syncno-swc, /home/user/SyncNo).
+# Script lives at $REPO/scripts/update.sh, so repo root = dirname twice.
+# Resolve symlinks in case script is invoked via symlink.
+SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+SCRIPT_PATH="$(readlink -f "${SCRIPT_PATH}")"
+DEFAULT_REPO_DIR="$(dirname "$(dirname "${SCRIPT_PATH}")")"
+REPO_DIR="${REPO_DIR:-${DEFAULT_REPO_DIR}}"
 HEALTH_URL="${HEALTH_URL:-http://localhost:3001/api/health}"
 HEALTH_TIMEOUT_SEC="${HEALTH_TIMEOUT_SEC:-90}"
 HEALTH_POLL_INTERVAL_SEC="${HEALTH_POLL_INTERVAL_SEC:-2}"
@@ -46,9 +53,13 @@ log "Pre-flight"
 PREV_SHA="$(git rev-parse --short HEAD)"
 log "Current SHA: ${PREV_SHA}"
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "ERROR: uncommitted changes in ${REPO_DIR}. Commit or stash before updating." >&2
-  git status --short >&2
+# Block only on tracked modifications (real conflict risk). Untracked files
+# are typically local data (.claude/, SyncNo/ CSVs, .env backups) and should
+# not gate an update — git pull --ff-only ignores them anyway.
+if ! git diff --quiet HEAD; then
+  echo "ERROR: tracked files have uncommitted modifications in ${REPO_DIR}." >&2
+  echo "Commit, stash, or discard them before updating:" >&2
+  git status --short --untracked-files=no >&2
   exit 1
 fi
 

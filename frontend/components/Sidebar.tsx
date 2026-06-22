@@ -81,7 +81,13 @@ export default function Sidebar() {
   const isAdmin = role === 'admin';
 
   const [enabled, setEnabled] = useState<Set<string> | null>(null);
-  const [version, setVersion] = useState<{ current: string; latest: string | null; updateAvailable: boolean | null } | null>(null);
+  const [version, setVersion] = useState<{
+    current: string;
+    latest: string | null;
+    updateAvailable: boolean | null;
+    installDir?: string;
+    updateCommand?: string;
+  } | null>(null);
 
   useEffect(() => {
     fetch('/api/sync/enabled')
@@ -106,12 +112,13 @@ export default function Sidebar() {
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
+  const updateCommand = version?.updateCommand || 'sudo /opt/syncno/scripts/update.sh';
+
   const copyUpdateCommand = () => {
-    const cmd = 'sudo /opt/syncno/scripts/update.sh';
     if (navigator.clipboard) {
-      navigator.clipboard.writeText(cmd).catch(() => {});
+      navigator.clipboard.writeText(updateCommand).catch(() => {});
     } else {
-      window.prompt('Run this via SSH:', cmd);
+      window.prompt('Run this via SSH:', updateCommand);
     }
   };
 
@@ -155,13 +162,13 @@ export default function Sidebar() {
                   </span>
                   <button
                     onClick={copyUpdateCommand}
-                    title="Click to copy: sudo /opt/syncno/scripts/update.sh"
+                    title={`Click to copy: ${updateCommand}`}
                     className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-yellow-900/50 text-yellow-300 hover:bg-yellow-900 cursor-pointer"
                   >
                     Update
                   </button>
                 </div>
-                <p className="text-[10px] text-gray-500 mt-1 font-mono">SSH: sudo /opt/syncno/scripts/update.sh</p>
+                <p className="text-[10px] text-gray-500 mt-1 font-mono">SSH: {updateCommand}</p>
               </>
             ) : (
               <span className="text-gray-500 text-xs">v {version.current}</span>

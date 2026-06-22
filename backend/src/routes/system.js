@@ -68,7 +68,14 @@ async function computeVersion() {
     const cmp = compareSemver(current, latest);
     updateAvailable = cmp === null ? null : cmp < 0;
   }
-  return { current, latest, updateAvailable };
+  const installDir = process.env.HOST_INSTALL_DIR || '/opt/syncno';
+  return {
+    current,
+    latest,
+    updateAvailable,
+    installDir,
+    updateCommand: `sudo ${installDir}/scripts/update.sh`,
+  };
 }
 
 // GET /api/system/version - current vs latest tag for sidebar display.

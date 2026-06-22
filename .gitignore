@@ -11,5 +11,9 @@ node_modules
 .env.production
 .backup.env
 SyncNo/*
+SyncNo/
 backend/data/json_export/
 .restic-password
+.claude/
+docker-compose.override.yml
+docker-compose.override.yaml
