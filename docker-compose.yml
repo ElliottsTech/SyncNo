@@ -14,6 +14,7 @@ services:
       - ./VERSION:/app/VERSION:ro
     environment:
       REPO_DIR: /app
+      HOST_INSTALL_DIR: ${HOST_INSTALL_DIR:-/opt/syncno}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       NEXTAUTH_URL: ${NEXTAUTH_URL}
       SYNCNO_API_KEY: ${SYNCNO_API_KEY}
