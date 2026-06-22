@@ -53,9 +53,13 @@ log "Pre-flight"
 PREV_SHA="$(git rev-parse --short HEAD)"
 log "Current SHA: ${PREV_SHA}"
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "ERROR: uncommitted changes in ${REPO_DIR}. Commit or stash before updating." >&2
-  git status --short >&2
+# Block only on tracked modifications (real conflict risk). Untracked files
+# are typically local data (.claude/, SyncNo/ CSVs, .env backups) and should
+# not gate an update — git pull --ff-only ignores them anyway.
+if ! git diff --quiet HEAD; then
+  echo "ERROR: tracked files have uncommitted modifications in ${REPO_DIR}." >&2
+  echo "Commit, stash, or discard them before updating:" >&2
+  git status --short --untracked-files=no >&2
   exit 1
 fi
 

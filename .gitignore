@@ -11,5 +11,7 @@ node_modules
 .env.production
 .backup.env
 SyncNo/*
+SyncNo/
 backend/data/json_export/
 .restic-password
+.claude/
