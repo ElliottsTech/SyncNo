@@ -3,6 +3,8 @@ import Providers from '../components/Providers';
 import LayoutContent from '../components/LayoutContent';
 import ActivityLogger from '../components/ActivityLogger';
 
+export const dynamic = 'force-dynamic';
+
 export const metadata = {
   title: 'Syncno',
   description: 'Syncro MSP Data Viewer',

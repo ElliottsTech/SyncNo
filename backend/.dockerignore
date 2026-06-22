@@ -1,4 +1,4 @@
 node_modules
 .git
-data/*.db
+data/
 *.md

@@ -10,7 +10,7 @@ RUN npm ci
 
 COPY . .
 
-RUN NEXT_TELEMETRY_DISABLED=1 npm run build
+RUN rm -f .env && : > .env && NEXT_TELEMETRY_DISABLED=1 npm run build
 
 FROM node:20-alpine
 
