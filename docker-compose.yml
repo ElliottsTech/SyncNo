@@ -19,6 +19,8 @@ services:
       SYNCNO_API_KEY: ${SYNCNO_API_KEY}
       SYNCRO_API_KEY: ${SYNCRO_API_KEY}
       SYNCRO_SUBDOMAIN: ${SYNCRO_SUBDOMAIN}
+    networks:
+      - syncno
     restart: unless-stopped
 
   frontend:
@@ -40,13 +42,15 @@ services:
       AZURE_TENANT_ID: ${AZURE_TENANT_ID}
     depends_on:
       - backend
+    networks:
+      - syncno
     restart: unless-stopped
 
 volumes:
   sqlite-data:
 
 networks:
-  default:
+  syncno:
     driver: bridge
     driver_opts:
       # Match docker0 MTU — ens3 path MTU is 1400 so 1500-byte container
