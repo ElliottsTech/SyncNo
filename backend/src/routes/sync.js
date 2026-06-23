@@ -1127,10 +1127,9 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
   }
 
   async function finishCatalog(state, isInitialSync) {
-    // Compute detail_total — count all non-resolved tickets (we re-fetch all every sync)
+    // detail_total = non-resolved tickets in DB (what detail phase will actually fetch)
     const row = db.prepare("SELECT COUNT(*) as cnt FROM tickets WHERE status != 'Resolved' AND deleted_at IS NULL").get();
     state.detail_total = row.cnt;
-    state.total_to_sync = row.cnt; // total tickets to sync this run
     state.detail_cursor = null;
     state.detail_synced = 0;
     state.phase = 'detail';
@@ -1138,12 +1137,30 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
     // Fetch page 1 for deletion detection and catalog tracking (always runs even in skipCatalog path)
     let page1Ids = [];
+    let discoveryTotal = row.cnt;
     try {
       const page1Data = await fetchJson(`${baseUrl}/tickets?page=1&per_page=100`, 'tickets_catalog');
       page1Ids = (page1Data.tickets || []).map(t => t.id);
       state.catalog_page1_ids = JSON.stringify(page1Ids);
       state.catalog_total_pages = page1Data.meta?.total_pages || state.catalog_total_pages || 0;
+      // total_to_sync = full discovery count (incl. Resolved) reported by Syncro.
+      // Prefer meta.total when present; otherwise compute page1 × (pages-1) + lastPage count.
+      const page1Count = (page1Data.tickets || []).length;
+      const totalPages = page1Data.meta?.total_pages || 1;
+      if (typeof page1Data.meta?.total === 'number') {
+        discoveryTotal = page1Data.meta.total;
+      } else if (totalPages <= 1) {
+        discoveryTotal = page1Count;
+      } else {
+        try {
+          const lastData = await fetchJson(`${baseUrl}/tickets?page=${totalPages}&per_page=100`, 'tickets_catalog_last');
+          discoveryTotal = page1Count * (totalPages - 1) + (lastData.tickets || []).length;
+        } catch (_) {
+          discoveryTotal = page1Count * totalPages;
+        }
+      }
     } catch (_) {}
+    state.total_to_sync = discoveryTotal;
 
     // Mark tickets deleted in Syncro (full catalog flow only; skipCatalog can't reliably detect deletions without fetching all pages)
     if (state._seenTicketIds) {
@@ -1359,6 +1376,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       state.phase = 'detail';
       state.detail_total = total;
+      state.total_to_sync = total;
       state.detail_synced = 0;
       // Only wipe checkpoint on forceAll — otherwise preserve for resume.
       if (forceAll) {
@@ -1472,6 +1490,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       state.phase = 'detail';
       state.detail_total = total;
+      state.total_to_sync = total;
       state.detail_synced = 0;
       if (forceAll) {
         state.detail_page = 1;
@@ -1580,6 +1599,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       state.phase = 'detail';
       state.detail_total = total;
+      state.total_to_sync = total;
       state.detail_synced = 0;
       if (forceAll) {
         state.detail_page = 1;
@@ -1688,6 +1708,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       state.phase = 'detail';
       state.detail_total = total;
+      state.total_to_sync = total;
       state.detail_synced = 0;
       if (forceAll) {
         state.detail_page = 1;
@@ -1795,6 +1816,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       state.phase = 'detail';
       state.detail_total = total;
+      state.total_to_sync = total;
       state.detail_synced = 0;
       if (forceAll) {
         state.detail_page = 1;
@@ -1902,6 +1924,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       state.phase = 'detail';
       state.detail_total = total;
+      state.total_to_sync = total;
       state.detail_synced = 0;
       if (forceAll) {
         state.detail_page = 1;
@@ -2007,6 +2030,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       state.phase = 'detail';
       state.detail_total = total;
+      state.total_to_sync = total;
       state.detail_synced = 0;
       if (forceAll) {
         state.detail_page = 1;
@@ -2114,6 +2138,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       state.phase = 'detail';
       state.detail_total = total;
+      state.total_to_sync = total;
       state.detail_synced = 0;
       if (forceAll) {
         state.detail_page = 1;
@@ -2222,6 +2247,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       state.phase = 'detail';
       state.detail_total = total;
+      state.total_to_sync = total;
       state.detail_synced = 0;
       if (forceAll) {
         state.detail_page = 1;
@@ -2554,6 +2580,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       state.phase = 'detail';
       state.detail_total = total;
+      state.total_to_sync = total;
       state.detail_synced = 0;
       if (forceAll) {
         state.detail_page = 1;
@@ -2609,6 +2636,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           state.detail_page = page;
           state.detail_item_index = absoluteIndex;
           state.detail_total = absoluteIndex;  // grows as we discover more
+          state.total_to_sync = absoluteIndex;
           saveSyncState(state);
           emitEvent({
             phase: entity, status: 'progress',
