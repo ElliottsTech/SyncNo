@@ -15,16 +15,23 @@ type Phase = 'customers' | 'contacts' | 'tickets' | 'invoices' | 'assets' | 'est
 
 type PhaseProgress = {
   phase: Phase;
-  status: 'started' | 'done' | 'error' | 'cancelled' | 'conflict' | 'resuming' | 'building_catalog';
+  status: 'started' | 'done' | 'error' | 'cancelled' | 'conflict' | 'resuming' | 'building_catalog' | 'paused' | 'rate_limited';
   count?: number;
   error?: string;
   message?: string;
+  pause_attempt?: number;
+  pause_minutes?: number;
+  resume_at?: string;
 };
 
 type LastResult = {
   count: number;
   error: string | null;
   last_sync: string | null;
+  total_to_sync: number;
+  db_count: number;
+  pause_attempt: number;
+  last_pause_until: string | null;
 };
 
 const ENTITY_PHASES: Phase[] = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
@@ -196,7 +203,7 @@ export default function SyncroPage() {
   );
 
   const [lastResults, setLastResults] = useState<Record<Phase, LastResult>>(
-    () => Object.fromEntries(ENTITY_PHASES.map(p => [p, { count: 0, error: null, last_sync: null }])) as Record<Phase, LastResult>
+    () => Object.fromEntries(ENTITY_PHASES.map(p => [p, { count: 0, error: null, last_sync: null, total_to_sync: 0, db_count: 0, pause_attempt: 0, last_pause_until: null }])) as Record<Phase, LastResult>
   );
 
   const [syncAllSyncing, setSyncAllSyncing] = useState(false);
@@ -343,6 +350,14 @@ export default function SyncroPage() {
     } else if (state.phase === 'detail') {
       // detail_item_index is the actual DB checkpoint; detail_synced is SSE-cached and can lag
       p.message = `detail ${state.detail_item_index || 0}/${state.detail_total || 0}`;
+    } else if (state.phase === 'paused') {
+      p.status = 'paused';
+      p.pause_attempt = state.pause_attempt;
+      p.resume_at = state.last_pause_until;
+      const mins = state.last_pause_until
+        ? Math.max(1, Math.round((new Date(state.last_pause_until).getTime() - Date.now()) / 60000))
+        : '?';
+      p.message = `Paused ${mins}min (attempt #${state.pause_attempt || '?'})`;
     } else if (state.phase === 'error') {
       p.status = 'error';
       p.error = 'error';
@@ -410,7 +425,7 @@ export default function SyncroPage() {
       .then(r => r.json())
       .then(data => {
         setLastResults(
-          Object.fromEntries(ENTITY_PHASES.map(p => [p, data[p] || { count: 0, error: null, last_sync: null }])) as Record<Phase, LastResult>
+          Object.fromEntries(ENTITY_PHASES.map(p => [p, data[p] || { count: 0, error: null, last_sync: null, total_to_sync: 0, db_count: 0, pause_attempt: 0, last_pause_until: null }])) as Record<Phase, LastResult>
         );
       })
       .catch(() => {});
@@ -529,6 +544,29 @@ export default function SyncroPage() {
       }));
       return;
     }
+    if (data.type === 'pause' || data.type === 'rate_limit' || data.status === 'paused' || data.status === 'rate_limited') {
+      const mins = data.pause_minutes || Math.max(1, Math.round((data.pause_seconds || 60) / 60));
+      const resumeStr = data.resume_at ? new Date(data.resume_at).toLocaleTimeString() : '?';
+      setEntityStatus(prev => ({
+        ...prev,
+        [phase]: {
+          phase,
+          status: data.status === 'rate_limited' ? 'rate_limited' : 'paused',
+          pause_attempt: data.pause_attempt,
+          pause_minutes: mins,
+          resume_at: data.resume_at,
+          message: data.message || `Paused ${mins}min — resume ${resumeStr}`,
+        } as PhaseProgress,
+      }));
+      return;
+    }
+    if (data.type === 'resume' || data.status === 'resuming') {
+      setEntityStatus(prev => ({
+        ...prev,
+        [phase]: { phase, status: 'started', message: data.message || `Resuming after attempt #${data.pause_attempt || ''}` },
+      }));
+      return;
+    }
     if (data.phase && data.status) {
       setEntityStatus(prev => ({
         ...prev,
@@ -596,6 +634,48 @@ export default function SyncroPage() {
       }
       setSyncAllProgress(prev => {
         const next = { ...prev, [phase]: { phase, status: 'started', message } };
+        saveSyncProgress(next);
+        return next;
+      });
+      return;
+    }
+
+    // Pause / rate-limit / resume events from fetchWithRetry backoff
+    if (data.type === 'pause' || data.type === 'rate_limit' || data.status === 'paused' || data.status === 'rate_limited') {
+      const phase = (data.phase as Phase) || 'tickets';
+      const mins = data.pause_minutes || Math.max(1, Math.round((data.pause_seconds || 60) / 60));
+      const resumeStr = data.resume_at ? new Date(data.resume_at).toLocaleTimeString() : '?';
+      setSyncAllProgress(prev => {
+        const next = {
+          ...prev,
+          [phase]: {
+            phase,
+            status: (data.status === 'rate_limited' ? 'rate_limited' : 'paused') as PhaseProgress['status'],
+            pause_attempt: data.pause_attempt,
+            pause_minutes: mins,
+            resume_at: data.resume_at,
+            message: data.message || `Paused ${mins}min — resume ${resumeStr}`,
+          },
+        };
+        saveSyncProgress(next);
+        return next;
+      });
+      return;
+    }
+    if (data.type === 'resume' || data.status === 'resuming') {
+      const phase = (data.phase as Phase) || 'tickets';
+      setSyncAllProgress(prev => {
+        const existing = prev[phase];
+        const next = {
+          ...prev,
+          [phase]: {
+            phase,
+            status: 'started' as const,
+            message: data.message || `Resuming after attempt #${data.pause_attempt || ''}`,
+            pause_attempt: existing?.pause_attempt,
+            resume_at: existing?.resume_at,
+          },
+        };
         saveSyncProgress(next);
         return next;
       });
@@ -838,6 +918,7 @@ export default function SyncroPage() {
     if (p.status === 'error') return '✗';
     if (p.status === 'cancelled') return '⊘';
     if (p.status === 'conflict') return '⚠';
+    if (p.status === 'paused' || p.status === 'rate_limited') return '⏸';
     if (p.status === 'resuming' || p.status === 'building_catalog') return '◐';
     return '◐';
   }
@@ -848,6 +929,7 @@ export default function SyncroPage() {
     if (p.status === 'error') return 'text-red-600';
     if (p.status === 'cancelled') return 'text-orange-600';
     if (p.status === 'conflict') return 'text-red-600 font-bold';
+    if (p.status === 'paused' || p.status === 'rate_limited') return 'text-yellow-600';
     if (p.status === 'resuming' || p.status === 'building_catalog') return 'text-blue-600';
     return 'text-blue-600';
   }
@@ -941,7 +1023,12 @@ export default function SyncroPage() {
                     <span className={`text-sm w-4 text-center ${phaseColor(progress)}`}>
                       {phaseIcon(progress)}
                     </span>
-                    <span className="text-sm text-gray-700 w-32">{PHASE_LABELS[phase]}</span>
+                    <span className="text-sm text-gray-700 w-40">
+                      {PHASE_LABELS[phase]}
+                      {lastResults[phase].total_to_sync > 0 && (
+                        <span className="text-gray-400 font-mono ml-1">({lastResults[phase].total_to_sync.toLocaleString()})</span>
+                      )}
+                    </span>
                     <button
                       onClick={() => handleSyncEntity(phase)}
                       disabled={isRunning}
@@ -1044,15 +1131,29 @@ export default function SyncroPage() {
                     {progress?.status === 'conflict' && (
                       <span className="text-xs text-red-600 font-bold">{progress.message}</span>
                     )}
-                    {!progress && lastResults[phase].error === 'cancelled' && (
-                      <span className="text-xs text-orange-500">Cancelled ({lastResults[phase].count})</span>
+                    {(progress?.status === 'paused' || progress?.status === 'rate_limited') && (
+                      <span className="text-xs text-yellow-600 font-medium" title={progress.resume_at ? `Resume: ${new Date(progress.resume_at).toLocaleString()}` : ''}>
+                        ⏸ {progress.message}
+                      </span>
                     )}
-                    {!progress && lastResults[phase].error && lastResults[phase].error !== 'cancelled' && (
-                      <span className="text-xs text-red-500">✗ {lastResults[phase].error}</span>
-                    )}
-                    {!progress && !lastResults[phase].error && lastResults[phase].count > 0 && (
-                      <span className="text-xs text-green-600">✓ {lastResults[phase].count}</span>
-                    )}
+                    {/* Right-aligned group: [DB count] [last-sync count] */}
+                    <div className="ml-auto flex items-center gap-2">
+                      {/* DB count — total records of this type currently in DB (left of last-sync) */}
+                      {lastResults[phase].db_count > 0 && (
+                        <span className="text-xs text-gray-500 font-mono" title="Records in DB">
+                          DB:{lastResults[phase].db_count.toLocaleString()}
+                        </span>
+                      )}
+                      {!progress && lastResults[phase].error === 'cancelled' && (
+                        <span className="text-xs text-orange-500">Cancelled ({lastResults[phase].count})</span>
+                      )}
+                      {!progress && lastResults[phase].error && lastResults[phase].error !== 'cancelled' && (
+                        <span className="text-xs text-red-500">✗ {lastResults[phase].error}</span>
+                      )}
+                      {!progress && !lastResults[phase].error && lastResults[phase].count > 0 && (
+                        <span className="text-xs text-green-600">✓ {lastResults[phase].count}</span>
+                      )}
+                    </div>
                   </div>
                 );
               })}

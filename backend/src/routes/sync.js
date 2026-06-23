@@ -10,16 +10,17 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// Ensure new sync_state columns exist (migration for existing DBs)
-try {
-  const db = getDb();
-  db.prepare("ALTER TABLE sync_state ADD COLUMN catalog_page1_ids TEXT DEFAULT '[]'").run();
-  db.prepare("ALTER TABLE sync_state ADD COLUMN catalog_total_pages INTEGER DEFAULT 0").run();
-  db.prepare("ALTER TABLE sync_state ADD COLUMN last_result_count INTEGER DEFAULT 0").run();
-  db.prepare("ALTER TABLE sync_state ADD COLUMN last_result_error TEXT DEFAULT NULL").run();
-  db.prepare("ALTER TABLE sync_state ADD COLUMN detail_page INTEGER DEFAULT 1").run();
-  db.prepare("ALTER TABLE sync_state ADD COLUMN detail_item_index INTEGER DEFAULT 0").run();
-} catch (_) {}
+// Ensure new sync_state columns exist (migration for existing DBs).
+// Each ALTER in own try/catch — first failure must not skip subsequent.
+try { getDb().prepare("ALTER TABLE sync_state ADD COLUMN catalog_page1_ids TEXT DEFAULT '[]'").run(); } catch (_) {}
+try { getDb().prepare("ALTER TABLE sync_state ADD COLUMN catalog_total_pages INTEGER DEFAULT 0").run(); } catch (_) {}
+try { getDb().prepare("ALTER TABLE sync_state ADD COLUMN last_result_count INTEGER DEFAULT 0").run(); } catch (_) {}
+try { getDb().prepare("ALTER TABLE sync_state ADD COLUMN last_result_error TEXT DEFAULT NULL").run(); } catch (_) {}
+try { getDb().prepare("ALTER TABLE sync_state ADD COLUMN detail_page INTEGER DEFAULT 1").run(); } catch (_) {}
+try { getDb().prepare("ALTER TABLE sync_state ADD COLUMN detail_item_index INTEGER DEFAULT 0").run(); } catch (_) {}
+try { getDb().prepare("ALTER TABLE sync_state ADD COLUMN total_to_sync INTEGER DEFAULT 0").run(); } catch (_) {}
+try { getDb().prepare("ALTER TABLE sync_state ADD COLUMN pause_attempt INTEGER DEFAULT 0").run(); } catch (_) {}
+try { getDb().prepare("ALTER TABLE sync_state ADD COLUMN last_pause_until TEXT DEFAULT NULL").run(); } catch (_) {}
 try {
   const db = getDb();
   db.prepare("ALTER TABLE tickets ADD COLUMN deleted_at TEXT DEFAULT NULL").run();
@@ -219,7 +220,10 @@ function saveSyncState(state) {
       catalog_page1_ids = ?,
       catalog_total_pages = ?,
       last_result_count = ?,
-      last_result_error = ?
+      last_result_error = ?,
+      total_to_sync = ?,
+      pause_attempt = ?,
+      last_pause_until = ?
     WHERE entity = ?
   `).run(
     state.phase,
@@ -235,6 +239,9 @@ function saveSyncState(state) {
     state.catalog_total_pages || 0,
     state.last_result_count != null ? state.last_result_count : 0,
     state.last_result_error || null,
+    state.total_to_sync != null ? state.total_to_sync : 0,
+    state.pause_attempt != null ? state.pause_attempt : 0,
+    state.last_pause_until || null,
     state.entity
   );
 }
@@ -324,10 +331,22 @@ router.get('/last-results', (req, res) => {
   const results = {};
   for (const ent of entities) {
     const state = getSyncState(ent);
+    let dbCount = 0;
+    try {
+      // Entity name matches table name for all current entities.
+      // Worksheet_results is derived from tickets — count tickets instead.
+      const table = ent === 'worksheet_results' ? 'tickets' : ent;
+      const row = db.prepare(`SELECT COUNT(*) as n FROM "${table}"`).get();
+      dbCount = row.n || 0;
+    } catch (_) {}
     results[ent] = {
       count: state.last_result_count || 0,
       error: state.last_result_error || null,
       last_sync: state.last_sync || null,
+      total_to_sync: state.total_to_sync || 0,
+      db_count: dbCount,
+      pause_attempt: state.pause_attempt || 0,
+      last_pause_until: state.last_pause_until || null,
     };
   }
   res.json(results);
@@ -621,20 +640,50 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
   const abortCtrl = getSyncAbortController(syncId);
   const syncSignal = abortCtrl.signal;
 
+  // Tracks which entity is currently syncing + consecutive 5xx/network failures.
+  // Reset consecutiveErrors to 0 on any successful response. Used by fetchWithRetry
+  // to compute pause duration and emit pause/resume events to the UI.
+  let currentEntity = entitiesToRun[0] || null;
+  let consecutiveErrors = 0;
+  const MAX_PAUSE_MIN = 30;
+
+  function computePauseMinutes(attempt) {
+    // 1, 2, 4, 8, 16, 30, 30, ...
+    return Math.min(Math.pow(2, attempt - 1), MAX_PAUSE_MIN);
+  }
+
   const headers = {
     'Authorization': `Bearer ${apiKey}`,
     'Content-Type': 'application/json',
   };
   const baseUrl = `https://${subdomain}.syncromsp.com/api/v1`;
 
-  // Compute accurate total record count: page1_count * (totalPages - 1) + lastPage_count
+  // Compute accurate total record count: page1_count * (totalPages - 1) + lastPage_count.
+  // Also persists the total to sync_state.total_to_sync so the UI can show
+  // "Tickets (29520)" style label that survives across syncs.
   async function computeTotalRecords(page1Data, endpoint, arrayField) {
     const totalPages = page1Data.meta?.total_pages || 1;
     const page1Count = (page1Data[arrayField] || []).length;
-    if (totalPages <= 1) return page1Count;
-    const lastPageData = await fetchJson(`${baseUrl}/${endpoint}?page=${totalPages}&per_page=100`, `${endpoint}_last_page`);
-    const lastPageCount = (lastPageData[arrayField] || []).length;
-    return page1Count * (totalPages - 1) + lastPageCount;
+    let total;
+    if (totalPages <= 1) {
+      total = page1Count;
+    } else {
+      const lastPageData = await fetchJson(`${baseUrl}/${endpoint}?page=${totalPages}&per_page=100`, `${endpoint}_last_page`);
+      const lastPageCount = (lastPageData[arrayField] || []).length;
+      total = page1Count * (totalPages - 1) + lastPageCount;
+    }
+    saveTotalToSync(currentEntity, total);
+    return total;
+  }
+
+  // Persist total_to_sync for given entity. Best-effort — never throws.
+  function saveTotalToSync(entity, total) {
+    if (!entity || total == null || total < 0) return;
+    try {
+      const st = getSyncState(entity);
+      st.total_to_sync = total;
+      saveSyncState(st);
+    } catch (e) { console.error('saveTotalToSync error:', e.message); }
   }
 
   const log = (action, details) => {
@@ -657,81 +706,173 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
   }
 
   async function fetchWithRetry(url, phase) {
-    await throttleRequest(); // global rate-limit gate (shared across all sync runs)
-    const start = Date.now();
-    const combinedSignal = AbortSignal.any([syncSignal, AbortSignal.timeout(30000)]);
-    const resp = await fetch(url, { headers, signal: combinedSignal });
-    const ms = Date.now() - start;
+    // Loop handles 429 + 5xx/network transient failures with escalating pause.
+    // 429 waits a fixed 65s (Syncro rate-limit window). 5xx/network uses
+    // exponential backoff: 1, 2, 4, 8, 16, 30 min cap. Reset on success.
+    for (;;) {
+      await throttleRequest(); // global rate-limit gate (shared across all sync runs)
+      const start = Date.now();
+      const combinedSignal = AbortSignal.any([syncSignal, AbortSignal.timeout(30000)]);
 
-    let body = '';
-    try { body = await resp.clone().text(); } catch (_) {}
-
-    emitEvent( {
-      type: 'http_log',
-      direction: 'response',
-      method: 'GET',
-      url,
-      status: resp.status,
-      phase: 'http_log',
-      duration_ms: ms,
-      body_preview: body.slice(0, 300),
-    }, res);
-
-    if (resp.status === 429) {
-      rateLimitHits++;
-      log('SYNC_RATE_LIMIT', `429 hit on ${url} — total hits: ${rateLimitHits}`);
-      // Wait out rate limit but allow abort to interrupt the sleep
+      let resp, fetchErr;
       try {
-        await new Promise((_, reject) => {
-          const t = setTimeout(() => reject(new Error('rate_limit_wait_done')), 65000);
-          syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-        });
+        resp = await fetch(url, { headers, signal: combinedSignal });
       } catch (e) {
+        // Network error / DNS / TLS / connect timeout — treat as transient.
         if (syncSignal.aborted) throw new Error('Sync cancelled');
-        // Rate limit wait completed normally — proceed to retry
+        fetchErr = e;
       }
-      await throttleRequest();
-      const retry = await fetch(url, { headers, signal: combinedSignal });
-      let retryBody = '';
-      try { retryBody = await retry.clone().text(); } catch (_) {}
+
+      const ms = Date.now() - start;
+      let body = '';
+      if (resp) { try { body = await resp.clone().text(); } catch (_) {} }
+
       emitEvent( {
         type: 'http_log',
         direction: 'response',
         method: 'GET',
         url,
-        status: retry.status,
+        status: resp ? resp.status : 0,
         phase: 'http_log',
-        duration_ms: Date.now() - start,
-        body_preview: retryBody.slice(0, 300),
+        duration_ms: ms,
+        body_preview: body.slice(0, 300),
       }, res);
-      if (!retry.ok) throw new ApiError(url, 'retry', retry.status, retryBody);
-      return { resp: retry, body: retryBody };
+
+      // Network failure → backoff retry
+      if (fetchErr) {
+        await pauseWithBackoff(url, 'network', fetchErr.message || String(fetchErr));
+        continue;
+      }
+
+      // Success → reset error counter, return
+      if (resp.ok && resp.status !== 429) {
+        consecutiveErrors = 0;
+        clearPauseState();
+        return { resp, body };
+      }
+
+      // 429 rate limit — fixed 65s wait, no backoff escalation
+      if (resp.status === 429) {
+        rateLimitHits++;
+        log('SYNC_RATE_LIMIT', `429 hit on ${url} — total hits: ${rateLimitHits}`);
+        emitPauseEvent('rate_limit', 65, url);
+        try {
+          await sleepAbortable(65 * 1000);
+        } catch (e) {
+          if (syncSignal.aborted) throw new Error('Sync cancelled');
+        }
+        await throttleRequest();
+        continue;
+      }
+
+      // 5xx → exponential backoff retry
+      if (resp.status >= 500 && resp.status < 600) {
+        await pauseWithBackoff(url, `http_${resp.status}`, body.slice(0, 200));
+        continue;
+      }
+
+      // Other 4xx — hard fail, no retry
+      throw new ApiError(url, 'page', resp.status, body);
+    }
+  }
+
+  // Sleep that respects abort signal. Resolves normally on timeout, rejects on abort.
+  function sleepAbortable(ms) {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(resolve, ms);
+      syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
+    });
+  }
+
+  // Compute next pause, emit event, log, update state, sleep.
+  async function pauseWithBackoff(url, reason, detail) {
+    consecutiveErrors++;
+    const attempt = consecutiveErrors;
+    const pauseMin = computePauseMinutes(attempt);
+    const pauseMs = pauseMin * 60 * 1000;
+    const resumeAt = new Date(Date.now() + pauseMs);
+
+    // Update sync_state for current entity so UI polling sees it
+    try {
+      if (currentEntity) {
+        const st = getSyncState(currentEntity);
+        st.pause_attempt = attempt;
+        st.last_pause_until = resumeAt.toISOString();
+        st.phase = 'paused';
+        saveSyncState(st);
+      }
+    } catch (_) {}
+
+    const msg = `[PAUSE] #${attempt} ${pauseMin}min (resume ${resumeAt.toISOString()}) — ${currentEntity || '?'} ${reason} ${url} — ${detail}`;
+    console.log(msg);
+    log('SYNC_PAUSE', msg);
+
+    emitEvent({
+      type: 'pause',
+      phase: currentEntity || 'all',
+      status: 'paused',
+      pause_attempt: attempt,
+      pause_seconds: Math.round(pauseMs / 1000),
+      pause_minutes: pauseMin,
+      resume_at: resumeAt.toISOString(),
+      reason,
+      url,
+      message: `Paused ${pauseMin}min (attempt #${attempt}) — resume ${resumeAt.toLocaleTimeString()}`,
+    }, res);
+
+    try {
+      await sleepAbortable(pauseMs);
+    } catch (e) {
+      if (syncSignal.aborted) throw new Error('Sync cancelled');
     }
 
-    if (!resp.ok) throw new ApiError(url, 'page', resp.status, body);
-    return { resp, body };
+    // Resumed
+    console.log(`[RESUME] attempt #${attempt} done — retrying ${url}`);
+    emitEvent({
+      type: 'resume',
+      phase: currentEntity || 'all',
+      status: 'resuming',
+      pause_attempt: attempt,
+      message: `Resuming after attempt #${attempt}`,
+    }, res);
+  }
+
+  function clearPauseState() {
+    if (!currentEntity) return;
+    try {
+      const st = getSyncState(currentEntity);
+      if (st.last_pause_until || st.pause_attempt || st.phase === 'paused') {
+        st.pause_attempt = 0;
+        st.last_pause_until = null;
+        // Don't override phase if a syncX function set it to something specific.
+        if (st.phase === 'paused') st.phase = 'idle';
+        saveSyncState(st);
+      }
+    } catch (_) {}
+  }
+
+  function emitPauseEvent(kind, seconds, url) {
+    const resumeAt = new Date(Date.now() + seconds * 1000);
+    emitEvent({
+      type: kind === 'rate_limit' ? 'rate_limit' : 'pause',
+      phase: currentEntity || 'all',
+      status: kind === 'rate_limit' ? 'rate_limited' : 'paused',
+      pause_seconds: seconds,
+      resume_at: resumeAt.toISOString(),
+      url,
+      message: `Rate limited — waiting ${seconds}s`,
+    }, res);
   }
 
   async function fetchJson(url, phase) {
-    let lastError;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const { resp, body } = await fetchWithRetry(url, phase);
-        if (!body || !body.trim()) throw new ApiError(url, 'empty_body', resp.status, body);
-        return JSON.parse(body);
-      } catch (e) {
-        lastError = e;
-        if (syncSignal.aborted) throw new Error('Sync cancelled');
-        // Retry once on empty body, parse error, or transient timeout
-        const transient = e instanceof SyntaxError
-          || (e instanceof ApiError && e.message === 'empty_body')
-          || e.name === 'TimeoutError'
-          || e.name === 'AbortError';
-        if (attempt === 0 && transient) continue;
-        throw e;
-      }
+    const { resp, body } = await fetchWithRetry(url, phase);
+    if (!body || !body.trim()) {
+      // Empty body — retry once via fresh fetch (transient)
+      const retry = await fetchWithRetry(url, phase + '_retry');
+      if (!retry.body || !retry.body.trim()) throw new ApiError(url, 'empty_body', retry.resp.status, retry.body || '');
+      return JSON.parse(retry.body);
     }
-    throw lastError;
+    return JSON.parse(body);
   }
 
   function checkAbort() {
@@ -989,6 +1130,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     // Compute detail_total — count all non-resolved tickets (we re-fetch all every sync)
     const row = db.prepare("SELECT COUNT(*) as cnt FROM tickets WHERE status != 'Resolved' AND deleted_at IS NULL").get();
     state.detail_total = row.cnt;
+    state.total_to_sync = row.cnt; // total tickets to sync this run
     state.detail_cursor = null;
     state.detail_synced = 0;
     state.phase = 'detail';
@@ -2249,6 +2391,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     const SERIAL_STATUSES = ['reserved', 'sold', 'returned', 'in_transfer', 'breakage', 'used_in_refurb', 'in_stock'];
     state.phase = 'detail';
     state.detail_total = serialized.length;
+    state.total_to_sync = serialized.length;
     state.detail_synced = 0;
     saveSyncState(state);
     let processed = 0;
@@ -2750,6 +2893,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
       const tickets = db.prepare('SELECT id, number FROM tickets ORDER BY id').all();
       state.phase = 'detail';
       state.detail_total = tickets.length;
+      state.total_to_sync = tickets.length;
       state.detail_synced = 0;
       if (forceAll) { state.detail_page = 1; state.detail_item_index = 0; }
       saveSyncState(state);
@@ -2824,6 +2968,8 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
   try {
     for (const ent of entitiesToRun) {
+      currentEntity = ent;
+      consecutiveErrors = 0; // reset between entities
       if (ent === 'tickets') await syncTickets();
       else if (ent === 'customers') await syncCustomers();
       else if (ent === 'contacts') await syncContacts();
