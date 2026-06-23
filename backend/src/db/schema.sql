@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS assets (
   rmm_store TEXT,
   address TEXT,
   customer TEXT,
+  policy_folder_id INTEGER,
   synced INTEGER DEFAULT 0
 );
 
@@ -519,6 +520,9 @@ CREATE TABLE IF NOT EXISTS policy_folders (
   name TEXT,
   customer_id INTEGER,
   asset_id INTEGER,
+  parent_id INTEGER,
+  partial_policy_id INTEGER,
+  effective_policy_id INTEGER,
   description TEXT,
   created_at TEXT,
   updated_at TEXT,
@@ -609,6 +613,9 @@ CREATE INDEX IF NOT EXISTS idx_contracts_customer ON contracts(customer_id);
 CREATE INDEX IF NOT EXISTS idx_leads_customer ON leads(customer_id);
 CREATE INDEX IF NOT EXISTS idx_policy_folders_customer ON policy_folders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_policy_folders_asset ON policy_folders(asset_id);
+CREATE INDEX IF NOT EXISTS idx_policy_folders_parent ON policy_folders(parent_id);
+CREATE INDEX IF NOT EXISTS idx_policy_folders_effective_policy ON policy_folders(effective_policy_id);
+CREATE INDEX IF NOT EXISTS idx_assets_policy_folder ON assets(policy_folder_id);
 CREATE INDEX IF NOT EXISTS idx_portal_users_customer ON portal_users(customer_id);
 CREATE INDEX IF NOT EXISTS idx_portal_users_contact ON portal_users(contact_id);
 CREATE INDEX IF NOT EXISTS idx_schedules_invoice ON schedules(invoice_id);

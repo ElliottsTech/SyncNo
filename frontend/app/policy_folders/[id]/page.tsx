@@ -27,31 +27,81 @@ export default function PolicyFolderDetail() {
         <div className="p-6 border-b">
           <h1 className="text-xl font-bold">{row.name || `#${row.id}`}</h1>
           {row.description && <p className="text-gray-600 text-sm mt-1">{row.description}</p>}
+          <div className="mt-2 text-sm text-gray-500 flex flex-wrap gap-x-4 gap-y-1">
+            {row.customer_name && (
+              <span>Customer:{' '}
+                <Link href={`/customers/${row.customer_id}`} className="text-blue-600 hover:underline">{row.customer_name}</Link>
+              </span>
+            )}
+            {row.effective_policy_id && <span>Effective Policy: <span className="font-mono">{row.effective_policy_id}</span></span>}
+            {row.partial_policy_id && <span>Partial Policy: <span className="font-mono">{row.partial_policy_id}</span></span>}
+          </div>
         </div>
+
+        <CollapsibleSection title={`Assets under this policy (${row.assets?.length || 0})`} defaultOpen>
+          {row.assets?.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 text-left text-gray-600">
+                  <tr>
+                    <th className="p-2">Name</th>
+                    <th className="p-2">Type</th>
+                    <th className="p-2">Serial</th>
+                    <th className="p-2">Customer</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {row.assets.map((a: any) => (
+                    <tr key={a.id} className="border-t hover:bg-gray-50">
+                      <td className="p-2">
+                        <Link href={`/assets/${a.id}`} className="text-blue-600 hover:underline font-medium">{a.name || `#${a.id}`}</Link>
+                      </td>
+                      <td className="p-2 text-gray-700">{a.asset_type || '—'}</td>
+                      <td className="p-2 font-mono text-xs">{a.asset_serial || '—'}</td>
+                      <td className="p-2">
+                        {a.customer_name
+                          ? <Link href={`/customers/${a.customer_id}`} className="text-blue-600 hover:underline">{a.customer_name}</Link>
+                          : <span className="text-gray-400">—</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-gray-500 text-sm">No assets linked to this policy folder.</p>
+          )}
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Hierarchy">
+          <div className="text-sm space-y-2">
+            {row.parent_folder ? (
+              <p>
+                <span className="text-gray-500">Parent:</span>{' '}
+                <Link href={`/policy_folders/${row.parent_folder.id}`} className="text-blue-600 hover:underline">{row.parent_folder.name}</Link>
+              </p>
+            ) : <p className="text-gray-500">No parent folder (root level).</p>}
+            {row.child_folders?.length > 0 && (
+              <div>
+                <p className="text-gray-500 mb-1">Children:</p>
+                <ul className="list-disc list-inside text-gray-700">
+                  {row.child_folders.map((c: any) => (
+                    <li key={c.id}>
+                      <Link href={`/policy_folders/${c.id}`} className="text-blue-600 hover:underline">{c.name}</Link>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
+
         <CollapsibleSection title="Details">
           <div className="text-sm space-y-1">
             <p><span className="text-gray-500">Created:</span> {row.created_at ? new Date(row.created_at).toLocaleString() : '—'}</p>
             <p><span className="text-gray-500">Updated:</span> {row.updated_at ? new Date(row.updated_at).toLocaleString() : '—'}</p>
           </div>
         </CollapsibleSection>
-        {(row.customer || row.asset) && (
-          <CollapsibleSection title="Links">
-            <div className="space-y-2 text-sm">
-              {row.customer && (
-                <p>
-                  <span className="text-gray-500">Customer:</span>{' '}
-                  <Link href={`/customers/${row.customer.id}`} className="text-blue-600 hover:underline">{row.customer.display_name || `#${row.customer.id}`}</Link>
-                </p>
-              )}
-              {row.asset && (
-                <p>
-                  <span className="text-gray-500">Asset:</span>{' '}
-                  <Link href={`/assets/${row.asset.id}`} className="text-blue-600 hover:underline">{row.asset.name || `#${row.asset.id}`}</Link>
-                </p>
-              )}
-            </div>
-          </CollapsibleSection>
-        )}
       </div>
       <RawJsonView rawJson={row.raw_json} label="Policy Folder Raw JSON" />
     </div>

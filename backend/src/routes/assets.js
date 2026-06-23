@@ -34,7 +34,8 @@ router.get('/', (req, res) => {
   const countRow = db.prepare(`SELECT COUNT(*) as total FROM assets ${whereStr}`).get(...params);
   const assets = db.prepare(`
     SELECT a.id, a.name, a.asset_type, a.asset_serial, a.customer_id,
-           a.created_at, a.updated_at, a.asset_type, a.properties, a.synced
+           a.created_at, a.updated_at, a.asset_type, a.properties, a.synced,
+           a.policy_folder_id
     FROM assets a ${whereStr}
     ORDER BY a.${safeSort} ${safeDir}
     LIMIT ? OFFSET ?
@@ -62,7 +63,7 @@ router.get('/', (req, res) => {
 // GET /api/assets/:id - asset detail
 router.get('/:id', (req, res) => {
   const db = getDb();
-  const asset = db.prepare('SELECT id, name, customer_id, contact_id, created_at, updated_at, properties, asset_type, asset_serial, external_rmm_link, rmm_links, has_live_chat, snmp_enabled, device_info, rmm_store, address, customer, raw_json, synced FROM assets WHERE id = ?').get(req.params.id);
+  const asset = db.prepare('SELECT id, name, customer_id, contact_id, created_at, updated_at, properties, asset_type, asset_serial, external_rmm_link, rmm_links, has_live_chat, snmp_enabled, device_info, rmm_store, address, customer, policy_folder_id, raw_json, synced FROM assets WHERE id = ?').get(req.params.id);
   if (!asset) return res.status(404).json({ error: 'Not found' });
 
   if (asset.properties && typeof asset.properties === 'string') {
@@ -84,6 +85,16 @@ router.get('/:id', (req, res) => {
     try {
       asset.rmm_links = JSON.parse(asset.rmm_links);
     } catch (_) {}
+  }
+
+  // Attach policy_folder info if linked
+  if (asset.policy_folder_id) {
+    asset.policy_folder = db.prepare(`
+      SELECT id, name, customer_id, parent_id, partial_policy_id, effective_policy_id
+      FROM policy_folders WHERE id = ?
+    `).get(asset.policy_folder_id) || null;
+  } else {
+    asset.policy_folder = null;
   }
 
   res.json(asset);
