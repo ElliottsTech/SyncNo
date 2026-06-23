@@ -3,48 +3,6 @@ import { useEffect, useRef } from 'react';
 import { useSession } from 'next-auth/react';
 
 const API = '/api';
-const ANALYTICS_URL = 'https://syncno.elliotts.tech:3003/dashboard/api/ping';
-
-function getOrCreateInstallId(): string {
-  const key = 'syncno_install_id';
-  let id = localStorage.getItem(key);
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem(key, id);
-  }
-  return id;
-}
-
-function shouldPingAnalytics(): boolean {
-  const key = 'lastPingDate';
-  const today = new Date().toISOString().split('T')[0];
-  const last = localStorage.getItem(key);
-  if (last !== today) {
-    localStorage.setItem(key, today);
-    return true;
-  }
-  return false;
-}
-
-function sendAnalyticsPing() {
-  const installId = getOrCreateInstallId();
-  console.log('Analytics ping firing', installId);
-  if (!shouldPingAnalytics()) return;
-  const params = new URLSearchParams({
-    install_id: installId,
-    ua: navigator.userAgent,
-    screen: `${window.screen.width}x${window.screen.height}`,
-    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    ref: document.referrer || 'direct',
-  });
-
-  // Use sendBeacon for reliability
-  fetch(`${ANALYTICS_URL}?${params.toString()}`, {
-    method: 'POST',
-    keepalive: true,
-    headers: { 'Content-Type': 'text/plain' },
-  }).catch(() => {});
-}
 
 function parseBrowser(ua: string) {
   if (!ua) return null;
@@ -78,9 +36,6 @@ export default function ActivityLogger() {
   const lastLogRef = useRef<string | null>(null);
 
   useEffect(() => {
-    // Fire analytics ping on any login
-    sendAnalyticsPing();
-
     const userId = session?.user?.id;
     if (userId && userId !== lastLogRef.current) {
       lastLogRef.current = userId;

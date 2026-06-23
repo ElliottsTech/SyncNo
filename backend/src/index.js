@@ -27,6 +27,7 @@ import wikiPagesRouter from './routes/wiki_pages.js';
 import syncRouter from './routes/sync.js';
 import systemRouter from './routes/system.js';
 import backupSettingsRouter from './routes/backup_settings.js';
+import { startAnalytics } from './analytics.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -142,4 +143,5 @@ app.get('/api/health', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Syncno API running on http://localhost:${PORT}`);
+  startAnalytics();
 });
