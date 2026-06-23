@@ -1,10 +1,11 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import RawJsonView from '../../../components/RawJsonView';
 import CollapsibleSection from '../../../components/CollapsibleSection';
 import { usePageTitle } from '../../../lib/usePageTitle';
+import { sanitizeHtml } from '../../../lib/sanitizeHtml';
 
 const API = '/api';
 
@@ -17,6 +18,9 @@ export default function WikiPageDetail() {
   }, [id]);
 
   usePageTitle(row ? `${row.name || 'Wiki'} — Syncno` : null);
+
+  const rawBody = row?.body || row?.interpolated_body || '';
+  const sanitized = useMemo(() => sanitizeHtml(rawBody), [rawBody]);
 
   if (!row) return <p className="text-gray-500">Loading...</p>;
 
@@ -32,7 +36,14 @@ export default function WikiPageDetail() {
           </p>
         </div>
         <CollapsibleSection title="Body">
-          <div className="prose prose-sm max-w-none whitespace-pre-wrap">{row.body || row.interpolated_body || '(empty)'}</div>
+          {sanitized ? (
+            <div
+              className="prose prose-sm max-w-none"
+              dangerouslySetInnerHTML={{ __html: sanitized }}
+            />
+          ) : (
+            <p className="text-gray-500 text-sm">(empty)</p>
+          )}
         </CollapsibleSection>
       </div>
       <RawJsonView rawJson={row.raw_json} label="Wiki Page Raw JSON" />

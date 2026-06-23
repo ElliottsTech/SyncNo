@@ -155,6 +155,30 @@ export default function AssetDetail() {
             </div>
           </CollapsibleSection>
         )}
+
+        <CollapsibleSection title="Policy Folder">
+          {asset.policy_folder ? (
+            <div className="text-sm space-y-1">
+              <p>
+                <span className="text-gray-500">Folder:</span>{' '}
+                <Link href={`/policy_folders/${asset.policy_folder.id}`} className="text-blue-600 hover:underline font-medium">
+                  {asset.policy_folder.name || `#${asset.policy_folder.id}`}
+                </Link>
+              </p>
+              {asset.policy_folder.effective_policy_id && (
+                <p><span className="text-gray-500">Effective Policy ID:</span> {asset.policy_folder.effective_policy_id}</p>
+              )}
+              {asset.policy_folder.partial_policy_id && (
+                <p><span className="text-gray-500">Partial Policy ID:</span> {asset.policy_folder.partial_policy_id}</p>
+              )}
+              {asset.policy_folder.parent_id && (
+                <p><span className="text-gray-500">Parent Folder ID:</span> {asset.policy_folder.parent_id}</p>
+              )}
+            </div>
+          ) : (
+            <p className="text-gray-500 text-sm">No policy folder linked</p>
+          )}
+        </CollapsibleSection>
       </div>
 
       <RawJsonView rawJson={asset.raw_json} label="Asset Raw JSON" />

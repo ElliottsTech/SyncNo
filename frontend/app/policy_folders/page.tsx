@@ -37,7 +37,17 @@ export default function PolicyFoldersPage() {
       key: 'name', label: 'Name',
       render: (v, row) => <Link href={`/policy_folders/${row.id}`} className="text-blue-600 hover:underline font-medium">{v || '(no name)'}</Link>,
     },
-    { key: 'description', label: 'Description' },
+    {
+      key: 'customer_name', label: 'Customer',
+      render: (v, row) => v
+        ? <Link href={`/customers/${row.customer_id}`} className="text-blue-600 hover:underline">{v}</Link>
+        : <span className="text-gray-400">—</span>,
+    },
+    {
+      key: 'asset_count', label: 'Assets',
+      render: (v, row) => <Link href={`/policy_folders/${row.id}`} className="text-blue-600 hover:underline">{v || 0}</Link>,
+    },
+    { key: 'effective_policy_id', label: 'Effective Policy', render: v => v || <span className="text-gray-400">—</span> },
     { key: 'created_at', label: 'Created', render: v => v ? new Date(v).toLocaleDateString() : '' },
   ];
 
