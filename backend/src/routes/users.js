@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getDb } from '../db/database.js';
+import { isDemo, demoNoop } from '../demo.js';
 
 const router = Router();
 
@@ -82,6 +83,7 @@ router.get('/:id', requireAdmin, (req, res) => {
 
 // PUT /api/users/:id/role - update role (admin only)
 router.put('/:id/role', requireAdmin, (req, res) => {
+  if (isDemo()) return demoNoop(req, res);
   const db = getDb();
   const { role } = req.body;
   if (!['admin', 'user'].includes(role)) {

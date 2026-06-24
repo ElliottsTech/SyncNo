@@ -1,13 +1,30 @@
 'use client';
 
 import { signIn } from 'next-auth/react';
-import { useSearchParams } from 'next/navigation';
-import { Suspense, useState } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
+import { Suspense, useEffect, useState } from 'react';
+import { IS_DEMO } from '../lib/demo';
 
 function LoginContent() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const error = searchParams.get('error');
   const [loading, setLoading] = useState(false);
+
+  // Demo mode: skip Microsoft button entirely. Fire the demo credentials
+  // provider once on mount — it auto-authorizes and redirects to /.
+  useEffect(() => {
+    if (!IS_DEMO) return;
+    signIn('demo', { callbackUrl: '/' });
+  }, []);
+
+  if (IS_DEMO) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
+        <div className="text-white/80 text-lg">Entering demo…</div>
+      </div>
+    );
+  }
 
   const handleSignIn = () => {
     setLoading(true);

@@ -1,17 +1,31 @@
 import Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
+import { readFileSync, copyFileSync, existsSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { isDemo } from '../demo.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const DB_PATH = join(__dirname, '../../data/syncro.db');
+const PROD_DB = process.env.SYNCNO_DB || join(__dirname, '../../data/syncro.db');
+const DEMO_SEED = join(__dirname, '../../data/demo.seed.db');
+const DEMO_LIVE = join(__dirname, '../../data/demo.db');
 
 let db = null;
 
 export function getDb() {
   if (!db) {
-    db = new Database(DB_PATH);
+    if (isDemo()) {
+      // Reset-to-seed on startup: copy seed over live when seed is newer or live missing.
+      // If seed itself is absent, fall through to an empty demo.db (initDb will run schema).
+      const seedExists = existsSync(DEMO_SEED);
+      const liveExists = existsSync(DEMO_LIVE);
+      if (seedExists && (!liveExists || statSync(DEMO_SEED).mtimeMs > statSync(DEMO_LIVE).mtimeMs)) {
+        copyFileSync(DEMO_SEED, DEMO_LIVE);
+      }
+      db = new Database(DEMO_LIVE);
+    } else {
+      db = new Database(PROD_DB);
+    }
     db.pragma('journal_mode = WAL');
     db.pragma('synchronous = NORMAL');
   }

@@ -2,6 +2,7 @@ import './globals.css';
 import Providers from '../components/Providers';
 import LayoutContent from '../components/LayoutContent';
 import ActivityLogger from '../components/ActivityLogger';
+import DemoBanner from '../components/DemoBanner';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,6 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body>
         <Providers>
+          <DemoBanner />
           <ActivityLogger />
           <LayoutContent>{children}</LayoutContent>
         </Providers>

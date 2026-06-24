@@ -1,4 +1,5 @@
 import { NextAuthOptions } from 'next-auth';
+import { IS_DEMO, DEMO_USER } from './demo';
 
 // Browser code uses NEXT_PUBLIC_API_URL (relative '/api' → Next.js rewrite → backend).
 // This file runs server-side only (NextAuth handler + middleware), so fetches need
@@ -53,6 +54,18 @@ export const authOptions: NextAuthOptions = {
         };
       },
     },
+    // Demo-only provider — accepts any sign-in attempt and returns the demo admin
+    // user. Only active when NEXT_PUBLIC_DEMO=yes. The jwt/session callbacks
+    // short-circuit in demo mode so no real auth round-trip happens.
+    ...(IS_DEMO ? [{
+      id: 'demo',
+      name: 'Demo',
+      type: 'credentials' as const,
+      credentials: {},
+      async authorize() {
+        return { id: DEMO_USER.id, name: DEMO_USER.name, email: DEMO_USER.email };
+      },
+    }] : []),
   ],
   pages: {
     signIn: '/login',
@@ -61,6 +74,7 @@ export const authOptions: NextAuthOptions = {
   session: { strategy: 'jwt' },
   callbacks: {
     async signIn({ user, account }: any) {
+      if (IS_DEMO) return true;
       if (account?.provider === 'azure-ad' && user?.email) {
         try {
           await fetch(`${SERVER_API}/users/upsert`, {
@@ -79,6 +93,12 @@ export const authOptions: NextAuthOptions = {
       return true;
     },
     async jwt({ token, account, user, trigger }: any) {
+      if (IS_DEMO) {
+        token.id = DEMO_USER.id;
+        token.role = DEMO_USER.role;
+        token.roleCheckedAt = Date.now();
+        return token;
+      }
       if (account && user) {
         token.id = user.id;
         const role = await fetchRole(user.id);
@@ -101,6 +121,10 @@ export const authOptions: NextAuthOptions = {
       return token;
     },
     async session({ session, token }: any) {
+      if (IS_DEMO) {
+        session.user = { ...DEMO_USER };
+        return session;
+      }
       if (session.user) {
         session.user.id = token.sub;
         session.user.role = token.role || 'user';

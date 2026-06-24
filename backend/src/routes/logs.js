@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getDb } from '../db/database.js';
+import { isDemo } from '../demo.js';
 
 const router = Router();
 
@@ -76,6 +77,7 @@ router.get('/', (req, res) => {
 
 // POST /api/logs - create log entry
 router.post('/', (req, res) => {
+  if (isDemo()) return res.json({ id: 0, demo: true });
   const db = getDb();
   const { user_id, action, details, ip_address, user_agent, browser, os, device_type, country } = req.body;
   if (!action) return res.status(400).json({ error: 'action required' });

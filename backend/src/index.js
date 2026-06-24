@@ -28,6 +28,7 @@ import syncRouter from './routes/sync.js';
 import systemRouter from './routes/system.js';
 import backupSettingsRouter from './routes/backup_settings.js';
 import { startAnalytics } from './analytics.js';
+import { isDemo, DEMO_USER } from './demo.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -63,6 +64,11 @@ const PUBLIC_PATHS = ['/api/health', '/api/auth/'];
 // Unauthenticated requests are rejected with 401.
 app.use(async (req, res, next) => {
   if (PUBLIC_PATHS.some(p => req.path === p || req.path.startsWith(p))) return next();
+
+  if (isDemo()) {
+    req.user = { ...DEMO_USER };
+    return next();
+  }
 
   // (a) Cookie path
   const cookieHeader = req.headers.cookie;

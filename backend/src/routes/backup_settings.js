@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, renameSy
 import { dirname, join } from 'path';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
+import { isDemo, demoNoop } from '../demo.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
@@ -145,6 +146,7 @@ router.get('/', requireAdmin, (req, res) => {
 
 // POST /api/backup-settings — write env file + rclone.conf + password file
 router.post('/', requireAdmin, (req, res) => {
+  if (isDemo()) return demoNoop(req, res);
   const body = req.body || {};
   try {
     const envConfig = body.env || {};
@@ -202,6 +204,7 @@ router.post('/', requireAdmin, (req, res) => {
 
 // POST /api/backup-settings/test — run rclone lsd sharepoint:
 router.post('/test', requireAdmin, async (req, res) => {
+  if (isDemo()) return res.json({ ok: true, demo: true, output: '[DEMO] rclone connection test simulated — no real call made.' });
   try {
     const env = { ...process.env, RCLONE_CONFIG: RCLONE_CONF_PATH };
     const { stdout, stderr } = await execFileP('rclone', ['lsd', `${RCLONE_REMOTE}:`], {
@@ -219,6 +222,7 @@ router.post('/test', requireAdmin, async (req, res) => {
 
 // POST /api/backup-settings/init — restic init
 router.post('/init', requireAdmin, async (req, res) => {
+  if (isDemo()) return res.json({ ok: true, demo: true, output: '[DEMO] restic init simulated — no real repository created.' });
   try {
     if (!existsSync(BACKUP_ENV_PATH)) return res.status(400).json({ error: '.backup.env missing — save config first' });
     const env = parseEnv(readFileSync(BACKUP_ENV_PATH, 'utf8'));
@@ -242,6 +246,7 @@ router.post('/init', requireAdmin, async (req, res) => {
 
 // POST /api/backup-settings/run — trigger systemd backup service now
 router.post('/run', requireAdmin, async (req, res) => {
+  if (isDemo()) return demoNoop(req, res);
   try {
     await execFileP('systemctl', ['start', 'syncno-backup.service'], { timeout: 10000 });
     res.json({ ok: true, message: 'Backup triggered. Check journalctl -u syncno-backup.service' });
@@ -252,6 +257,7 @@ router.post('/run', requireAdmin, async (req, res) => {
 
 // POST /api/backup-settings/enable-timer
 router.post('/enable-timer', requireAdmin, async (req, res) => {
+  if (isDemo()) return demoNoop(req, res);
   try {
     await execFileP('systemctl', ['enable', '--now', 'syncno-backup.timer'], { timeout: 10000 });
     res.json({ ok: true });
@@ -262,6 +268,7 @@ router.post('/enable-timer', requireAdmin, async (req, res) => {
 
 // GET /api/backup-settings/status — timer + last backup
 router.get('/status', requireAdmin, async (req, res) => {
+  if (isDemo()) return res.json({ timerEnabled: false, timerActive: false, nextRun: null, demo: true });
   try {
     const timer = await execFileP('systemctl', ['is-enabled', 'syncno-backup.timer'], { timeout: 5000 }).then(r => r.stdout.trim()).catch(() => 'unknown');
     const active = await execFileP('systemctl', ['is-active', 'syncno-backup.timer'], { timeout: 5000 }).then(r => r.stdout.trim()).catch(() => 'unknown');
@@ -306,6 +313,7 @@ async function fetchAllPages(entity, apiKey) {
 // GET /api/backup-settings/download-json — tar.gz of every entity's JSON.
 // Stages JSON files in tmpfs, tars streaming, deletes after.
 router.get('/download-json', requireAdmin, (req, res) => {
+  if (isDemo()) return res.status(410).json({ error: 'Downloads disabled in demo mode', demo: true });
   withLock(res, async () => {
     const stamp = ts();
     const stage = join(STAGE_BASE, `json-${stamp}`);
@@ -339,6 +347,7 @@ router.get('/download-json', requireAdmin, (req, res) => {
 // Stages a consistent SQLite snapshot in tmpfs, tars streaming with -h (follows
 // symlinks for attachments + env files), deletes after.
 router.get('/download', requireAdmin, (req, res) => {
+  if (isDemo()) return res.status(410).json({ error: 'Downloads disabled in demo mode', demo: true });
   withLock(res, async () => {
     const stamp = ts();
     const stage = join(STAGE_BASE, `full-${stamp}`);

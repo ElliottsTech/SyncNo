@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getDb } from '../db/database.js';
+import { isDemo, demoNoop } from '../demo.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -429,6 +430,7 @@ router.get('/credentials', requireAdmin, (req, res) => {
 });
 
 router.post('/save', requireAdmin, (req, res) => {
+  if (isDemo()) return demoNoop(req, res);
   const { apiKey, subdomain } = req.body;
   const existingKey = getSetting('syncro_api_key');
   const existingSub = getSetting('syncro_subdomain');
@@ -460,6 +462,7 @@ router.post('/save', requireAdmin, (req, res) => {
 // too. Empty fields inherit the existing value rather than overwriting with
 // blank. AZURE_CLIENT_SECRET is sensitive — /credentials masks it for display.
 router.post('/save-azure', requireAdmin, (req, res) => {
+  if (isDemo()) return demoNoop(req, res);
   const { clientId, clientSecret, tenantId } = req.body;
   const finalClientId = clientId || process.env.AZURE_CLIENT_ID;
   const finalTenantId = tenantId || process.env.AZURE_TENANT_ID;
@@ -491,6 +494,20 @@ router.post('/save-azure', requireAdmin, (req, res) => {
 // ─── API: Preview ─────────────────────────────────────────────────────────────
 
 router.post('/preview', requireAdmin, async (req, res) => {
+  if (isDemo()) {
+    return res.json({
+      since: null,
+      sinceLabel: 'DEMO — preview not available',
+      entities: {
+        customers: { total: 0, page1Total: 0 },
+        contacts: { total: 0, page1Total: 0 },
+        tickets: { total: 0, page1Total: 0 },
+        invoices: { total: 0, page1Total: 0 },
+      },
+      errors: [],
+      demo: true,
+    });
+  }
   const apiKey = getSetting('syncro_api_key');
   const subdomain = getSetting('syncro_subdomain');
 
@@ -562,8 +579,10 @@ router.post('/trigger', requireAdmin, async (req, res) => {
   const dateFrom = req.body.date_from ? String(req.body.date_from).slice(0, 10) : null;
   const dateTo = req.body.date_to ? String(req.body.date_to).slice(0, 10) : null;
 
-  const apiKey = getSetting('syncro_api_key');
-  const subdomain = getSetting('syncro_subdomain');
+  const demo = isDemo();
+
+  const apiKey = demo ? 'demo-key' : getSetting('syncro_api_key');
+  const subdomain = demo ? 'demo' : getSetting('syncro_subdomain');
 
   if (!apiKey || !subdomain) {
     return res.status(400).json({ error: 'Syncro not configured' });
@@ -621,13 +640,161 @@ router.post('/trigger', requireAdmin, async (req, res) => {
   // Run sync in next tick (non-blocking)
   setImmediate(() => {
     try {
-      Promise.resolve(runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, { dateFrom, dateTo }))
-        .catch(err => console.error('runSync unhandled:', err.message));
+      const runner = demo
+        ? runFakeSync(entitiesToRun, forceAll, res, syncId)
+        : runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, { dateFrom, dateTo });
+      Promise.resolve(runner).catch(err => console.error(`${demo ? 'runFakeSync' : 'runSync'} unhandled:`, err.message));
     } catch (err) {
-      console.error('runSync threw synchronously:', err.message);
+      console.error('sync runner threw synchronously:', err.message);
     }
   });
 });
+
+// ─── Demo fake sync runner ────────────────────────────────────────────────────
+// Simulates sync progress with realistic SSE events. No real API calls, no DB
+// row inserts — only sync_state/sync_events/logs are touched so the UI and
+// SyncTerminal show believable activity. Events flow through emitEvent so polling
+// clients (SyncTerminal) see the same stream as the SSE response.
+
+const FAKE_RECORD_SAMPLES = {
+  customers: ['Acme Corp', 'Globex Industries', 'Initech LLC', 'Umbrella Ltd', 'Wayne Enterprises', 'Stark Industries', 'Cyberdyne Systems', 'Soylent Inc'],
+  contacts: ['John Smith', 'Jane Doe', 'Bob Johnson', 'Alice Wong', 'Carlos Mendez', 'Priya Patel', 'Mike Brown', 'Sara Lee'],
+  tickets: ['#1023 Printer offline', '#1024 Email setup', '#1025 Server reboot', '#1026 Backup failure', '#1027 VPN issue', '#1028 Slow PC', '#1029 New hire setup', '#1030 License renewal'],
+  invoices: ['INV-2026-001', 'INV-2026-002', 'INV-2026-003', 'INV-2026-004'],
+  assets: ['Dell OptiPlex 7090', 'HP EliteBook 840', 'MacBook Pro 14', 'Lenovo ThinkPad X1', 'Surface Pro 9'],
+  estimates: ['EST-001 Server refresh', 'EST-002 Office network', 'EST-003 Workstation rollout'],
+  purchase_orders: ['PO-2026-001', 'PO-2026-002', 'PO-2026-003'],
+  vendors: ['Dell Technologies', 'CDW', 'Insight', 'SHI', 'Connection'],
+  products: ['Microsoft 365 Business Premium', 'SentinelOne', 'NordLayer VPN', 'Acronis Cyber Backup'],
+  payments: ['PMT-001', 'PMT-002', 'PMT-003'],
+  product_serials: ['SN-AC-2026-001', 'SN-AC-2026-002'],
+  appointments: ['Site visit 06-25', 'Onboarding 06-26', 'Maintenance 06-27'],
+  contracts: ['MSA — Acme Corp', 'MSA — Globex Industries'],
+  leads: ['New lead — website form', 'New lead — referral'],
+  policy_folders: ['Acme Corp folder', 'Globex folder'],
+  portal_users: ['puser@acme.com', 'puser@globex.com'],
+  schedules: ['Recurring maintenance — Acme', 'Recurring backup — Globex'],
+  syncro_users: ['tech1@msp.com', 'tech2@msp.com'],
+  wiki_pages: ['Password Reset SOP', 'New Hire Checklist', 'Offboarding Procedure'],
+  worksheet_results: ['WK-1023 printer fix', 'WK-1024 email setup'],
+};
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function runFakeSync(entitiesToRun, forceAll, res, syncId) {
+  const db = getDb();
+  const startedAt = Date.now();
+  const abort = getSyncAbortController(syncId);
+  const aborted = () => abort.signal.aborted;
+
+  console.log(`[DEMO] runFakeSync start entities=[${entitiesToRun.join(',')}] forceAll=${forceAll}`);
+
+  for (const entity of entitiesToRun) {
+    if (aborted()) {
+      console.log(`[DEMO] runFakeSync aborted before ${entity}`);
+      break;
+    }
+
+    const state = getSyncState(entity);
+    const samples = FAKE_RECORD_SAMPLES[entity] || ['Record 1', 'Record 2', 'Record 3', 'Record 4'];
+    // Realistic total: scale with samples, capped to feel believable
+    const total = Math.max(samples.length, Math.floor(Math.random() * 60) + 20);
+
+    state.phase = 'building_catalog';
+    state.total_to_sync = total;
+    state.detail_total = total;
+    state.detail_synced = 0;
+    state.last_result_error = null;
+    saveSyncState(state);
+
+    emitEvent({
+      entity, phase: 'building_catalog', status: 'start',
+      message: `[DEMO] Building catalog for ${entity}…`, total, current: 0,
+    }, res);
+    await sleep(300 + Math.random() * 300);
+
+    // Simulate catalog pagination
+    const pages = Math.max(1, Math.ceil(total / 50));
+    for (let p = 1; p <= pages; p++) {
+      if (aborted()) break;
+      emitEvent({
+        entity, phase: 'building_catalog', status: 'progress',
+        message: `[DEMO] Fetched page ${p}/${pages}`,
+        current: Math.min(p * 50, total), total,
+        currentRecordId: `page-${p}`,
+        currentRecordName: `${entity} catalog page ${p}`,
+      }, res);
+      await sleep(150 + Math.random() * 150);
+    }
+
+    if (aborted()) {
+      state.phase = 'idle';
+      state.last_result_error = 'cancelled';
+      saveSyncState(state);
+      emitEvent({ entity, phase: 'cancelled', message: `[DEMO] ${entity} cancelled` }, res);
+      continue;
+    }
+
+    // Detail phase — iterate records
+    state.phase = 'detail';
+    saveSyncState(state);
+    emitEvent({
+      entity, phase: 'detail', status: 'start',
+      message: `[DEMO] Fetching details for ${total} ${entity} records…`,
+      current: 0, total,
+    }, res);
+
+    for (let i = 1; i <= total; i++) {
+      if (aborted()) break;
+      const sample = samples[i % samples.length];
+      state.detail_synced = i;
+      saveSyncState(state);
+      emitEvent({
+        entity, phase: 'detail', status: 'progress',
+        message: `[DEMO] ${i}/${total} — ${sample}`,
+        current: i, total,
+        currentRecordId: `${entity}-${i}`,
+        currentRecordName: sample,
+      }, res);
+      // Sparse updates — don't emit per-row or the stream drowns
+      if (i % Math.max(1, Math.floor(total / 12)) === 0 || i === total) {
+        await sleep(120 + Math.random() * 180);
+      }
+    }
+
+    if (aborted()) {
+      state.phase = 'idle';
+      state.last_result_error = 'cancelled';
+      saveSyncState(state);
+      emitEvent({ entity, phase: 'cancelled', message: `[DEMO] ${entity} cancelled` }, res);
+      continue;
+    }
+
+    state.phase = 'idle';
+    state.last_result_count = total;
+    state.last_result_error = null;
+    state.last_sync = new Date().toISOString();
+    saveSyncState(state);
+    setSetting('last_sync', state.last_sync);
+
+    emitEvent({
+      entity, phase: 'done', status: 'complete',
+      message: `[DEMO] ${entity} sync complete — ${total} records`,
+      current: total, total, count: total,
+    }, res);
+    console.log(`[DEMO] runFakeSync ${entity} done total=${total}`);
+  }
+
+  // Stream end event — frontend parser closes the XHR
+  try {
+    res.write(`data: ${JSON.stringify({ done: true, demo: true, durationMs: Date.now() - startedAt })}\n\n`);
+    res.end();
+  } catch (_) {}
+  // Drop this response from liveClients
+  const idx = liveClients.indexOf(res);
+  if (idx >= 0) liveClients.splice(idx, 1);
+  console.log(`[DEMO] runFakeSync complete entities=[${entitiesToRun.join(',')}]`);
+}
 
 // ─── Sync runner (runs detached from HTTP response) ───────────────────────────
 
@@ -3078,6 +3245,7 @@ router.delete('/trigger', requireAdmin, (req, res) => {
 // ─── API: Reset sync state ───────────────────────────────────────────────────
 
 router.post('/reset', requireAdmin, (req, res) => {
+  if (isDemo()) return demoNoop(req, res);
   const { entity } = req.body;
   const entities = entity ? [entity] : ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
   for (const ent of entities) {
@@ -3238,9 +3406,11 @@ function checkSchedule() {
     console.error('schedule check error:', e.message);
   }
 }
-scheduleTimer = setInterval(checkSchedule, SCHEDULE_CHECK_INTERVAL_MS);
-// Initial check shortly after startup so a missed-time-while-down window is small
-setTimeout(checkSchedule, 5000);
+if (!isDemo()) {
+  scheduleTimer = setInterval(checkSchedule, SCHEDULE_CHECK_INTERVAL_MS);
+  // Initial check shortly after startup so a missed-time-while-down window is small
+  setTimeout(checkSchedule, 5000);
+}
 
 // ─── API: Schedule GET/POST ──────────────────────────────────────────────────
 
@@ -3249,6 +3419,7 @@ router.get('/schedule', (req, res) => {
 });
 
 router.post('/schedule', requireAdmin, (req, res) => {
+  if (isDemo()) return res.json({ ok: true, demo: true, schedule: getSchedule() });
   const { schedule } = req.body || {};
   if (!schedule || typeof schedule !== 'object') {
     return res.status(400).json({ error: 'schedule object required' });
@@ -3305,6 +3476,7 @@ router.get('/enabled', (req, res) => {
 });
 
 router.post('/enabled', requireAdmin, (req, res) => {
+  if (isDemo()) return demoNoop(req, res);
   const { entities } = req.body || {};
   if (!Array.isArray(entities)) {
     return res.status(400).json({ error: 'entities array required' });
