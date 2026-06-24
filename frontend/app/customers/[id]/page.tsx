@@ -9,14 +9,14 @@ import { usePageTitle } from '../../../lib/usePageTitle';
 
 const API = '/api';
 
-type Tab = 'overview' | 'tickets' | 'assets' | 'invoices' | 'estimates' | 'payments' | 'contacts' | 'schedules';
+type Tab = 'overview' | 'tickets' | 'assets' | 'policies' | 'invoices' | 'estimates' | 'payments' | 'contacts' | 'schedules';
 
 export default function CustomerDetail() {
   const { id } = useParams();
   const searchParams = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
-  const VALID_TABS: Tab[] = ['overview', 'tickets', 'assets', 'invoices', 'estimates', 'payments', 'contacts', 'schedules'];
+  const VALID_TABS: Tab[] = ['overview', 'tickets', 'assets', 'policies', 'invoices', 'estimates', 'payments', 'contacts', 'schedules'];
   const initialTab = searchParams.get('tab') as Tab;
   const [customer, setCustomer] = useState<any>(null);
   const [tab, setTab] = useState<Tab>(VALID_TABS.includes(initialTab) ? initialTab : 'overview');
@@ -36,6 +36,7 @@ export default function CustomerDetail() {
   const [payments, setPayments] = useState<any[]>([]);
   const [contacts, setContacts] = useState<any[]>([]);
   const [schedules, setSchedules] = useState<any[]>([]);
+  const [policies, setPolicies] = useState<{ folders: any[]; derived: any[]; totalFolders: number; totalAssets: number } | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   // Load all data in parallel on mount
@@ -49,7 +50,8 @@ export default function CustomerDetail() {
       fetch(`${API}/customers/${id}/payments`).then(r => r.json()),
       fetch(`${API}/customers/${id}/contacts`).then(r => r.json()),
       fetch(`${API}/customers/${id}/schedules`).then(r => r.json()),
-    ]).then(([cust, tkt, ast, inv, est, pay, con, sch]) => {
+      fetch(`${API}/customers/${id}/policies`).then(r => r.json()),
+    ]).then(([cust, tkt, ast, inv, est, pay, con, sch, pol]) => {
       setCustomer(cust);
       setTickets(tkt.data || []);
       setAssets(ast);
@@ -58,6 +60,7 @@ export default function CustomerDetail() {
       setPayments(pay);
       setContacts(con);
       setSchedules(sch);
+      setPolicies(pol);
       setLoaded(true);
     });
   }, [id]);
@@ -74,6 +77,7 @@ export default function CustomerDetail() {
     { key: 'overview', label: 'Overview' },
     { key: 'tickets', label: tabLabel('tickets', 'Tickets', tickets.length) },
     { key: 'assets', label: tabLabel('assets', 'Assets', assets.length) },
+    { key: 'policies', label: tabLabel('policies', 'Policies', (policies?.folders.length || 0) + (policies?.derived.length || 0)) },
     { key: 'invoices', label: tabLabel('invoices', 'Invoices', invoices.length) },
     { key: 'estimates', label: tabLabel('estimates', 'Estimates', estimates.length) },
     { key: 'payments', label: tabLabel('payments', 'Payments', payments.length) },
@@ -165,12 +169,20 @@ export default function CustomerDetail() {
             },
             { key: 'asset_type', label: 'Type' },
             { key: 'asset_serial', label: 'Serial' },
+            {
+              key: 'policy_folder_id', label: 'Policy',
+              render: (v) => v
+                ? <Link href={`/policy_folders/${v}`} className="text-blue-600 hover:underline font-mono text-xs">#{v}</Link>
+                : <span className="text-gray-400">—</span>,
+            },
             { key: 'created_at', label: 'Created', render: v => v ? new Date(v).toLocaleDateString() : '' },
           ]}
           data={assets}
           emptyMessage="No assets"
         />
       )}
+
+      {tab === 'policies' && <PoliciesTab policies={policies} loaded={loaded} />}
 
       {tab === 'invoices' && (
         <DataTable
@@ -250,6 +262,136 @@ export default function CustomerDetail() {
       )}
 
       <RawJsonView rawJson={customer.raw_json} label="Customer Raw JSON" />
+    </div>
+  );
+}
+
+// Recursive folder node — handles real policy_folders (with children, effective_policy)
+// and derived groups (asset.policy_folder_id clusters with no folder metadata).
+function FolderNode({ folder, depth = 0 }: { folder: any; depth?: number }) {
+  const [open, setOpen] = useState(true);
+  const [childOpen, setChildOpen] = useState<Record<number, boolean>>({});
+  const name = folder.name?.trim() || (folder.derived ? `Policy Folder #${folder.id}` : `(unnamed #${folder.id})`);
+  const hasChildren = folder.children && folder.children.length > 0;
+  const assetCount = folder.assets?.length || 0;
+  const toggleChild = (cid: number) => setChildOpen(prev => ({ ...prev, [cid]: !prev[cid] }));
+
+  return (
+    <div className={depth > 0 ? 'ml-4 border-l border-gray-200 pl-3' : ''} style={{ marginLeft: depth * 16 }}>
+      <div className="flex items-center gap-2 py-1.5 group">
+        {hasChildren ? (
+          <button
+            onClick={() => setOpen(o => !o)}
+            className="text-xs text-gray-500 hover:text-gray-700 w-4"
+            aria-label={open ? 'Collapse' : 'Expand'}
+          >
+            {open ? '▼' : '▶'}
+          </button>
+        ) : (
+          <span className="w-4 text-gray-300 text-xs">▾</span>
+        )}
+        <span className="text-gray-400" aria-hidden>📁</span>
+        <Link
+          href={`/policy_folders/${folder.id}`}
+          className="text-sm font-medium text-gray-800 hover:text-blue-600 hover:underline"
+        >
+          {name}
+        </Link>
+        {folder.derived && (
+          <span className="text-[10px] uppercase tracking-wide text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded" title="Folder metadata not yet synced — derived from asset links">
+            derived
+          </span>
+        )}
+        {folder.effective_policy_id && (
+          <span className="text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded font-mono" title="Effective policy ID">
+            effective #{folder.effective_policy_id}
+          </span>
+        )}
+        {folder.partial_policy_id && (
+          <span className="text-[10px] text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded font-mono" title="Partial policy ID">
+            partial #{folder.partial_policy_id}
+          </span>
+        )}
+        <span className="text-xs text-gray-400">
+          {assetCount > 0 && `${assetCount} asset${assetCount === 1 ? '' : 's'}`}
+          {hasChildren && folder.children.length > 0 && (assetCount > 0 ? ' · ' : '') + `${folder.children.length} sub`}
+        </span>
+        {folder.description && (
+          <span className="text-xs text-gray-400 truncate hidden md:inline-block">— {folder.description}</span>
+        )}
+      </div>
+
+      {open && (
+        <div>
+          {/* Linked assets under this folder */}
+          {assetCount > 0 && (
+            <div className="ml-8 mb-1">
+              {folder.assets.map((a: any) => (
+                <div key={a.id} className="flex items-center gap-2 py-1 text-sm">
+                  <span className="text-gray-300" aria-hidden>⋅</span>
+                  <span className="text-gray-400" aria-hidden>📦</span>
+                  <Link href={`/assets/${a.id}`} className="text-blue-600 hover:underline">{a.name || '(unnamed)'}</Link>
+                  {a.asset_type && <span className="text-xs text-gray-500">{a.asset_type}</span>}
+                  {a.asset_serial && <span className="text-xs text-gray-400 font-mono">{a.asset_serial}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Recurse into children */}
+          {hasChildren && folder.children.map((c: any) => (
+            <FolderNode key={c.id} folder={c} depth={depth + 1} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PoliciesTab({ policies, loaded }: { policies: { folders: any[]; derived: any[]; totalFolders: number; totalAssets: number } | null; loaded: boolean }) {
+  if (!loaded) return <p className="text-gray-500">Loading policies...</p>;
+  if (!policies) return <p className="text-gray-500 text-sm">No policy data.</p>;
+
+  const realFolders = policies.folders || [];
+  const derived = policies.derived || [];
+  const total = realFolders.length + derived.length;
+  const derivedAssetCount = derived.reduce((sum, f) => sum + (f.assets?.length || 0), 0);
+
+  if (total === 0) {
+    return (
+      <div className="bg-white border rounded p-8 text-center">
+        <div className="text-4xl mb-2 opacity-40">🗂️</div>
+        <p className="text-gray-700 font-medium">No policy folders</p>
+        <p className="text-sm text-gray-500 mt-1">
+          This customer has {policies.totalAssets || 0} assets, none linked to a policy folder.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-blue-50 border border-blue-100 rounded p-3 text-sm text-blue-800">
+        <span className="font-medium">{total}</span> policy folder{total === 1 ? '' : 's'}
+        {realFolders.length > 0 && <span className="text-blue-600"> · {realFolders.length} synced</span>}
+        {derived.length > 0 && (
+          <span className="text-amber-700"> · {derived.length} derived from {derivedAssetCount} linked asset{derivedAssetCount === 1 ? '' : 's'}</span>
+        )}
+        {derived.length > 0 && (
+          <span className="block text-xs text-amber-600 mt-1">
+            Derived folders appear here until <code className="bg-amber-100 px-1 rounded">policy_folders</code> sync completes.
+          </span>
+        )}
+      </div>
+
+      <div className="bg-white border rounded p-4">
+        {realFolders.map((f: any) => (
+          <FolderNode key={f.id} folder={f} />
+        ))}
+        {derived.map((f: any) => (
+          <FolderNode key={`d-${f.id}`} folder={f} />
+        ))}
+      </div>
     </div>
   );
 }

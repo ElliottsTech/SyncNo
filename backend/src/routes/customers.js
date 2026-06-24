@@ -116,8 +116,73 @@ router.get('/:id/tickets', (req, res) => {
 // GET /api/customers/:id/assets
 router.get('/:id/assets', (req, res) => {
   const db = getDb();
-  const assets = db.prepare('SELECT id, name, asset_type, asset_serial, created_at FROM assets WHERE customer_id = ? ORDER BY name').all(req.params.id);
+  const assets = db.prepare('SELECT id, name, asset_type, asset_serial, created_at, policy_folder_id FROM assets WHERE customer_id = ? ORDER BY name').all(req.params.id);
   res.json(assets);
+});
+
+// GET /api/customers/:id/policies
+// Returns policy folder tree for a customer:
+//   - folders:  policy_folders with parent_id hierarchy, each with children + linked assets
+//   - derived:  when no policy_folders exist, group the customer's assets by policy_folder_id
+//   - assets:   all customer assets (for the tree to attach as leaves when needed)
+router.get('/:id/policies', (req, res) => {
+  const db = getDb();
+  const customerId = req.params.id;
+
+  const folderRows = db.prepare(`
+    SELECT id, name, description, customer_id, asset_id, parent_id,
+           partial_policy_id, effective_policy_id, created_at, updated_at
+    FROM policy_folders
+    WHERE customer_id = ?
+    ORDER BY COALESCE(name, '')
+  `).all(customerId);
+
+  const assetRows = db.prepare(`
+    SELECT id, name, asset_type, asset_serial, created_at, policy_folder_id
+    FROM assets
+    WHERE customer_id = ?
+    ORDER BY name
+  `).all(customerId);
+
+  const assetsByFolder = {};
+  for (const a of assetRows) {
+    const key = a.policy_folder_id;
+    if (key == null) continue;
+    if (!assetsByFolder[key]) assetsByFolder[key] = [];
+    assetsByFolder[key].push(a);
+  }
+
+  // Real folders exist — build hierarchy.
+  if (folderRows.length > 0) {
+    const byId = {};
+    for (const f of folderRows) {
+      byId[f.id] = { ...f, children: [], assets: assetsByFolder[f.id] || [] };
+    }
+    const roots = [];
+    for (const f of folderRows) {
+      const node = byId[f.id];
+      if (f.parent_id && byId[f.parent_id]) {
+        byId[f.parent_id].children.push(node);
+      } else {
+        roots.push(node);
+      }
+    }
+    return res.json({ folders: roots, derived: [], totalFolders: folderRows.length, totalAssets: assetRows.length });
+  }
+
+  // Fallback: derive groups from asset.policy_folder_id (policy_folders sync pending).
+  const derived = Object.keys(assetsByFolder).map(folderId => ({
+    id: Number(folderId),
+    name: null,
+    description: null,
+    parent_id: null,
+    effective_policy_id: null,
+    partial_policy_id: null,
+    derived: true,
+    assets: assetsByFolder[folderId],
+  })).sort((a, b) => b.assets.length - a.assets.length);
+
+  return res.json({ folders: [], derived, totalFolders: 0, totalAssets: assetRows.length });
 });
 
 // GET /api/customers/:id/invoices
