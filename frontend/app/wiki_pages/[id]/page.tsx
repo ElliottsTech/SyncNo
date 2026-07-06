@@ -5,6 +5,7 @@ import Link from 'next/link';
 import RawJsonView from '../../../components/RawJsonView';
 import CollapsibleSection from '../../../components/CollapsibleSection';
 import { usePageTitle } from '../../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 import { sanitizeHtml } from '../../../lib/sanitizeHtml';
 
 const API = '/api';
@@ -12,9 +13,12 @@ const API = '/api';
 export default function WikiPageDetail() {
   const { id } = useParams();
   const [row, setRow] = useState<any>(null);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/wiki_pages/${id}`).then(r => r.json()).then(setRow);
+    fetchJson(`${API}/wiki_pages/${id}`)
+      .then(setRow)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
   }, [id]);
 
   usePageTitle(row ? `${row.name || 'Wiki'} — Syncno` : null);
@@ -22,6 +26,7 @@ export default function WikiPageDetail() {
   const rawBody = row?.body || row?.interpolated_body || '';
   const sanitized = useMemo(() => sanitizeHtml(rawBody), [rawBody]);
 
+  if (notFound) return <p className="text-gray-500">Failed to load wiki page.</p>;
   if (!row) return <p className="text-gray-500">Loading...</p>;
 
   return (

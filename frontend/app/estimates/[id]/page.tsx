@@ -5,22 +5,25 @@ import Link from 'next/link';
 import Badge from '../../../components/Badge';
 import RawJsonView from '../../../components/RawJsonView';
 import { usePageTitle } from '../../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
 export default function EstimateDetail() {
   const { id } = useParams();
   const [estimate, setEstimate] = useState<any>(null);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
     if (!id) return;
-    fetch(`${API}/estimates/${id}`)
-      .then(r => r.json())
-      .then(setEstimate);
+    fetchJson(`${API}/estimates/${id}`)
+      .then(setEstimate)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
   }, [id]);
 
   usePageTitle(estimate ? `Estimate #${estimate.number} — Syncno` : null);
 
+  if (notFound) return <p className="text-gray-500">Failed to load estimate.</p>;
   if (!estimate) return <p className="text-gray-500">Loading...</p>;
 
   const raw = estimate.raw_json ? (typeof estimate.raw_json === 'string' ? JSON.parse(estimate.raw_json) : estimate.raw_json) : null;
@@ -45,13 +48,15 @@ export default function EstimateDetail() {
               type="checkbox"
               checked={!!estimate.synced}
               onChange={async (e) => {
-                await fetch(`${API}/sync/synced`, {
-                  method: 'PATCH',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ table: 'estimates', id: estimate.id, synced: !estimate.synced }),
-                });
-                const res = await fetch(`${API}/estimates/${id}`).then(r => r.json());
-                setEstimate(res);
+                try {
+                  await fetchJson(`${API}/sync/synced`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ table: 'estimates', id: estimate.id, synced: !estimate.synced }),
+                  });
+                  const res = await fetchJson(`${API}/estimates/${id}`);
+                  setEstimate(res);
+                } catch (err) { if (!(err instanceof UnauthorizedError)) { /* keep current state */ } }
               }}
               className="w-5 h-5 cursor-pointer mt-1"
               title={estimate.synced ? 'Synced — click to force re-sync' : 'Not synced'}

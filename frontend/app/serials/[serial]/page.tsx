@@ -5,6 +5,7 @@ import Link from 'next/link';
 import Badge from '../../../components/Badge';
 import RawJsonView from '../../../components/RawJsonView';
 import { usePageTitle } from '../../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
@@ -41,15 +42,11 @@ export default function SerialDetail() {
   const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/serials/${encodeURIComponent(serialStr)}`)
-      .then(r => {
-        if (r.status === 404) {
-          setNotFound(true);
-          return null;
-        }
-        return r.json();
-      })
-      .then(d => { if (d) setData(d); });
+    fetchJson(`${API}/serials/${encodeURIComponent(serialStr)}`)
+      .then(setData)
+      // 404 (and any other non-auth failure) → show the not-found state, as
+      // before. UnauthorizedError already triggered a redirect.
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
   }, [serialStr]);
 
   usePageTitle(data?.serial ? `Serial ${data.serial.serial_number} — Syncno` : null);

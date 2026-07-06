@@ -5,21 +5,24 @@ import Link from 'next/link';
 import Badge from '../../../components/Badge';
 import RawJsonView from '../../../components/RawJsonView';
 import { usePageTitle } from '../../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
 export default function PaymentDetail() {
   const { id } = useParams();
   const [payment, setPayment] = useState<any>(null);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/payments/${id}`)
-      .then(r => r.json())
-      .then(setPayment);
+    fetchJson(`${API}/payments/${id}`)
+      .then(setPayment)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
   }, [id]);
 
   usePageTitle(payment ? `Payment ${payment.ref_num || payment.id} — Syncno` : null);
 
+  if (notFound) return <p className="text-gray-500">Failed to load payment.</p>;
   if (!payment) return <p className="text-gray-500">Loading...</p>;
 
   const raw = payment.raw_json ? (typeof payment.raw_json === 'string' ? JSON.parse(payment.raw_json) : payment.raw_json) : null;
@@ -36,13 +39,15 @@ export default function PaymentDetail() {
               type="checkbox"
               checked={!!payment.synced}
               onChange={async (e) => {
-                await fetch(`${API}/sync/synced`, {
-                  method: 'PATCH',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ table: 'payments', id: payment.id, synced: !payment.synced }),
-                });
-                const res = await fetch(`${API}/payments/${id}`).then(r => r.json());
-                setPayment(res);
+                try {
+                  await fetchJson(`${API}/sync/synced`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ table: 'payments', id: payment.id, synced: !payment.synced }),
+                  });
+                  const res = await fetchJson(`${API}/payments/${id}`);
+                  setPayment(res);
+                } catch (err) { if (!(err instanceof UnauthorizedError)) { /* keep current state */ } }
               }}
               className="w-5 h-5 cursor-pointer mt-1"
               title={payment.synced ? 'Synced — click to force re-sync' : 'Not synced'}

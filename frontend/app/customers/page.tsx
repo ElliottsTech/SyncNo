@@ -5,6 +5,7 @@ import DataTable from '../../components/DataTable';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
 import { usePageTitle } from '../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../lib/fetch';
 
 const API = '/api';
 
@@ -30,12 +31,14 @@ export default function CustomersPage() {
       .filter(([_, v]) => v)
       .map(([k, v]) => `&filter_${k}=${encodeURIComponent(v)}`)
       .join('');
-    fetch(`${API}/customers?page=${page}&limit=50${globalSearch}${colFilters}${sort}`)
-      .then(r => r.json())
+    fetchJson(`${API}/customers?page=${page}&limit=50${globalSearch}${colFilters}${sort}`)
       .then(d => {
-        setCustomers(d.data);
-        setPagination(d.pagination);
+        setCustomers(d.data || []);
+        setPagination(d.pagination || { page: 1, limit: 50, total: 0 });
         setLoading(false);
+      })
+      .catch(e => {
+        if (!(e instanceof UnauthorizedError)) { setCustomers([]); setLoading(false); }
       });
   }, [listState]);
 

@@ -6,6 +6,7 @@ import Badge from '../../../components/Badge';
 import { usePageTitle } from '../../../lib/usePageTitle';
 import RawJsonView from '../../../components/RawJsonView';
 import CollapsibleSection from '../../../components/CollapsibleSection';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
@@ -97,22 +98,30 @@ export default function TicketDetail() {
   const [attachmentsMeta, setAttachmentsMeta] = useState<{ count: number, synced_at: string | null }>({ count: 0, synced_at: null });
   const [openWorksheet, setOpenWorksheet] = useState<number | null>(null);
   const [worksheetDetail, setWorksheetDetail] = useState<any>(null);
+  const [notFound, setNotFound] = useState(false);
+
+  // Safe per-call fetchers: on failure leave the related slice empty rather
+  // than feeding an error object into state. UnauthorizedError triggers a
+  // redirect inside fetchJson, so we only swallow non-auth failures here.
+  const safeList = (setter: (v: any[]) => void) => (e: any) => {
+    if (!(e instanceof UnauthorizedError)) setter([]);
+  };
 
   useEffect(() => {
-    fetch(`${API}/tickets/${id}`).then(r => r.json()).then(setTicket);
-    fetch(`${API}/tickets/${id}/comments`).then(r => r.json()).then(setComments);
-    fetch(`${API}/tickets/${id}/time_entries`).then(r => r.json()).then(setTimeEntries);
-    fetch(`${API}/tickets/${id}/line_items`).then(r => r.json()).then(setLineItems);
-    fetch(`${API}/tickets/${id}/invoices`).then(r => r.json()).then(setInvoices);
-    fetch(`${API}/tickets/${id}/estimates`).then(r => r.json()).then(setEstimates);
-    fetch(`${API}/tickets/${id}/appointments`).then(r => r.json()).then(setAppointments);
-    fetch(`${API}/tickets/${id}/worksheet_results`).then(r => r.json()).then(setWorksheets);
-    fetch(`${API}/tickets/${id}/attachments`)
-      .then(r => r.json())
+    fetchJson(`${API}/tickets/${id}`).then(setTicket).catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
+    fetchJson(`${API}/tickets/${id}/comments`).then(setComments).catch(safeList(setComments));
+    fetchJson(`${API}/tickets/${id}/time_entries`).then(setTimeEntries).catch(safeList(setTimeEntries));
+    fetchJson(`${API}/tickets/${id}/line_items`).then(setLineItems).catch(safeList(setLineItems));
+    fetchJson(`${API}/tickets/${id}/invoices`).then(setInvoices).catch(safeList(setInvoices));
+    fetchJson(`${API}/tickets/${id}/estimates`).then(setEstimates).catch(safeList(setEstimates));
+    fetchJson(`${API}/tickets/${id}/appointments`).then(setAppointments).catch(safeList(setAppointments));
+    fetchJson(`${API}/tickets/${id}/worksheet_results`).then(setWorksheets).catch(safeList(setWorksheets));
+    fetchJson(`${API}/tickets/${id}/attachments`)
       .then(d => {
         setAttachments(Array.isArray(d?.data) ? d.data : []);
         setAttachmentsMeta({ count: d?.attachments_count || 0, synced_at: d?.attachments_synced_at || null });
-      });
+      })
+      .catch(e => { if (!(e instanceof UnauthorizedError)) { setAttachments([]); } });
   }, [id]);
 
   const openWorksheetDetail = (wid: number) => {
@@ -123,21 +132,26 @@ export default function TicketDetail() {
     }
     setOpenWorksheet(wid);
     setWorksheetDetail(null);
-    fetch(`${API}/tickets/${id}/worksheet_results/${wid}`).then(r => r.json()).then(setWorksheetDetail);
+    fetchJson(`${API}/tickets/${id}/worksheet_results/${wid}`)
+      .then(setWorksheetDetail)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setWorksheetDetail(null); });
   };
 
   const toggleSynced = async () => {
-    await fetch(`${API}/sync/synced`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ table: 'tickets', id: ticket.id, synced: !ticket.synced }),
-    });
-    const res = await fetch(`${API}/tickets/${id}`).then(r => r.json());
-    setTicket(res);
+    try {
+      await fetchJson(`${API}/sync/synced`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ table: 'tickets', id: ticket.id, synced: !ticket.synced }),
+      });
+      const res = await fetchJson(`${API}/tickets/${id}`);
+      setTicket(res);
+    } catch (err) { if (!(err instanceof UnauthorizedError)) { /* keep current state */ } }
   };
 
   usePageTitle(ticket ? `#${ticket.number} ${ticket.subject || ''} — Syncno` : null);
 
+  if (notFound) return <p className="text-gray-500">Failed to load ticket.</p>;
   if (!ticket) return <p className="text-gray-500">Loading...</p>;
 
   // Pull embedded entities + extras from raw_json if present

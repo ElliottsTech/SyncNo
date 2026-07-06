@@ -5,6 +5,7 @@ import Link from 'next/link';
 import DataTable from '../../../components/DataTable';
 import Badge from '../../../components/Badge';
 import RawJsonView from '../../../components/RawJsonView';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
@@ -12,16 +13,18 @@ export default function VendorDetail() {
   const { id } = useParams();
   const [vendor, setVendor] = useState<any>(null);
   const [purchaseOrders, setPurchaseOrders] = useState<any[]>([]);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/vendors/${id}`)
-      .then(r => r.json())
-      .then(setVendor);
-    fetch(`${API}/vendors/${id}/purchase_orders`)
-      .then(r => r.json())
-      .then(setPurchaseOrders);
+    fetchJson(`${API}/vendors/${id}`)
+      .then(setVendor)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
+    fetchJson(`${API}/vendors/${id}/purchase_orders`)
+      .then(setPurchaseOrders)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setPurchaseOrders([]); });
   }, [id]);
 
+  if (notFound) return <p className="text-gray-500">Failed to load vendor.</p>;
   if (!vendor) return <p className="text-gray-500">Loading...</p>;
 
   return (
@@ -35,13 +38,15 @@ export default function VendorDetail() {
               type="checkbox"
               checked={!!vendor.synced}
               onChange={async (e) => {
-                await fetch(`${API}/sync/synced`, {
-                  method: 'PATCH',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ table: 'vendors', id: vendor.id, synced: !vendor.synced }),
-                });
-                const res = await fetch(`${API}/vendors/${id}`).then(r => r.json());
-                setVendor(res);
+                try {
+                  await fetchJson(`${API}/sync/synced`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ table: 'vendors', id: vendor.id, synced: !vendor.synced }),
+                  });
+                  const res = await fetchJson(`${API}/vendors/${id}`);
+                  setVendor(res);
+                } catch (err) { if (!(err instanceof UnauthorizedError)) { /* keep current state */ } }
               }}
               className="w-5 h-5 cursor-pointer mt-1"
               title={vendor.synced ? 'Synced — click to force re-sync' : 'Not synced'}

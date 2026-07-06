@@ -7,21 +7,24 @@ import DataTable from '../../../components/DataTable';
 import RawJsonView from '../../../components/RawJsonView';
 import CollapsibleSection from '../../../components/CollapsibleSection';
 import { usePageTitle } from '../../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
 export default function ProductDetail() {
   const { id } = useParams();
   const [product, setProduct] = useState<any>(null);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/products/${id}`)
-      .then(r => r.json())
-      .then(setProduct);
+    fetchJson(`${API}/products/${id}`)
+      .then(setProduct)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
   }, [id]);
 
   usePageTitle(product ? `${product.name || 'Product'} — Syncno` : null);
 
+  if (notFound) return <p className="text-gray-500">Failed to load product.</p>;
   if (!product) return <p className="text-gray-500">Loading...</p>;
 
   const fmtMoney = (v: any) => {
@@ -62,13 +65,15 @@ export default function ProductDetail() {
                 type="checkbox"
                 checked={!!product.synced}
                 onChange={async (e) => {
-                  await fetch(`${API}/sync/synced`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ table: 'products', id: product.id, synced: !product.synced }),
-                  });
-                  const res = await fetch(`${API}/products/${id}`).then(r => r.json());
-                  setProduct(res);
+                  try {
+                    await fetchJson(`${API}/sync/synced`, {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ table: 'products', id: product.id, synced: !product.synced }),
+                    });
+                    const res = await fetchJson(`${API}/products/${id}`);
+                    setProduct(res);
+                  } catch (err) { if (!(err instanceof UnauthorizedError)) { /* keep current state */ } }
                 }}
                 className="w-5 h-5 cursor-pointer mt-1"
                 title={product.synced ? 'Synced — click to force re-sync' : 'Not synced'}

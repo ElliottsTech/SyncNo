@@ -77,8 +77,10 @@ export default function DataTable({
     setTimeout(() => filterRefs.current[colKey]?.focus(), 50);
   }, []);
 
-  // Client-side filter + sort
-  let result = [...data];
+  // Client-side filter + sort.
+  // Defense-in-depth: a non-array (e.g. a 401 error object from the backend)
+  // must never reach the spread, or it throws "TypeError: r is not iterable".
+  let result = Array.isArray(data) ? [...data] : [];
   if (!serverSide) {
     for (const [col, val] of Object.entries(filters)) {
       if (val) {
@@ -103,7 +105,8 @@ export default function DataTable({
     if (filterTimerRef.current) clearTimeout(filterTimerRef.current);
   }, []);
 
-  const showEmpty = !loading && (!data || data.length === 0);
+  const dataArray = Array.isArray(data) ? data : [];
+  const showEmpty = !loading && dataArray.length === 0;
 
   return (
     <div className="overflow-x-auto">

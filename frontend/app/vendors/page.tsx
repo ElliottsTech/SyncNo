@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import DataTable from '../../components/DataTable';
 import { usePageTitle } from '../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../lib/fetch';
 
 const API = '/api';
 
@@ -11,9 +12,9 @@ export default function VendorsPage() {
   const [vendors, setVendors] = useState([]);
 
   const fetchVendors = useCallback(() => {
-    fetch(`${API}/vendors`)
-      .then(r => r.json())
-      .then(setVendors);
+    fetchJson(`${API}/vendors`)
+      .then(setVendors)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setVendors([]); });
   }, []);
 
   useEffect(() => {

@@ -4,19 +4,22 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import Badge from '../../../components/Badge';
 import RawJsonView from '../../../components/RawJsonView';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
 export default function PurchaseOrderDetail() {
   const { id } = useParams();
   const [po, setPo] = useState<any>(null);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/purchase-orders/${id}`)
-      .then(r => r.json())
-      .then(setPo);
+    fetchJson(`${API}/purchase-orders/${id}`)
+      .then(setPo)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
   }, [id]);
 
+  if (notFound) return <p className="text-gray-500">Failed to load purchase order.</p>;
   if (!po) return <p className="text-gray-500">Loading...</p>;
 
   const lineItems = Array.isArray(po.line_items) ? po.line_items : [];
@@ -33,13 +36,15 @@ export default function PurchaseOrderDetail() {
               type="checkbox"
               checked={!!po.synced}
               onChange={async (e) => {
-                await fetch(`${API}/sync/synced`, {
-                  method: 'PATCH',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ table: 'purchase_orders', id: po.id, synced: !po.synced }),
-                });
-                const res = await fetch(`${API}/purchase-orders/${id}`).then(r => r.json());
-                setPo(res);
+                try {
+                  await fetchJson(`${API}/sync/synced`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ table: 'purchase_orders', id: po.id, synced: !po.synced }),
+                  });
+                  const res = await fetchJson(`${API}/purchase-orders/${id}`);
+                  setPo(res);
+                } catch (err) { if (!(err instanceof UnauthorizedError)) { /* keep current state */ } }
               }}
               className="w-5 h-5 cursor-pointer mt-1"
               title={po.synced ? 'Synced — click to force re-sync' : 'Not synced'}
