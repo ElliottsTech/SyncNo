@@ -56,6 +56,15 @@ NEXT_PUBLIC_API_URL=/api
 # Service key — shared secret for NextAuth server-side callbacks and MCP servers.
 # Backend accepts Authorization: Bearer <SYNCNO_API_KEY> as alternative to browser cookie.
 SYNCNO_API_KEY=openssl rand -base64 32
+
+# Demo mode — set to "yes" to flip the app into a public-demo profile:
+# no sign-on (any sign-in attempt succeeds as a demo admin), simulated syncs,
+# no-op mutations, and a separate demo DB (backend/data/demo.db, seeded from
+# demo.seed.db). Omit for a normal authenticated deployment.
+DEMO=no
+# NEXT_PUBLIC_DEMO must match at build time so the client bundle knows it's a
+# demo build (gated sign-in provider). Set both to "yes" for a demo image.
+NEXT_PUBLIC_DEMO=no
 ```
 
 Generate secrets: `openssl rand -base64 32`
@@ -113,6 +122,33 @@ Authorization rules:
 ### Integrating an MCP server
 
 Run the MCP server on the same host (or Docker network). Read `SYNCNO_API_KEY` and `BACKEND_URL` from the environment, send `Authorization: Bearer <key>` on every request. No special endpoints — the same routes the frontend uses are available to the MCP server. Service-key requests are tagged `req.user.role === 'service'`; they pass `requireAuth` but not `requireAdmin`, so admin-only mutations stay blocked.
+
+---
+
+## Demo Mode
+
+A single codebase builds both the live app and a public-facing demo. The mode is selected entirely by env flags — no separate branch or build config.
+
+Set `DEMO=yes` (backend) and `NEXT_PUBLIC_DEMO=yes` (frontend, must be set at build time so the client bundle is gated) to enable. With demo mode on:
+
+- **Auth is bypassed** — the NextAuth provider accepts any sign-in and returns a fixed `Demo Admin` user (`demo@syncno.local`). No Azure round-trip.
+- **A separate DB is used** — `backend/data/demo.db` (seeded from `demo.seed.db` on first run), so demo activity never touches the live database.
+- **Mutations are no-ops** — sync triggers, credential saves, and other writes return `{ ok: true, demo: true }` without hitting Syncro or disk (`demoNoop` in `backend/src/demo.js`).
+
+Useful for public trials, sales demos, and screenshots. Leave both flags unset for a normal authenticated deployment.
+
+---
+
+## Backups
+
+Built-in encrypted backups via [restic](https://restic.net/) + [rclone](https://rclone.org/) to SharePoint. Configured from the UI at **Settings → Backup** (`/settings/backup`, admin only); the underlying config lives at `/api/backup-settings`.
+
+- **What gets backed up:** the SQLite DB (`backend/data/syncro.db`) and ticket attachments (`backend/data/attachments/`).
+- **Where:** restic repository on a SharePoint remote via rclone (the `sharepoint` rclone remote). Password can be supplied directly or read from a file (`RESTIC_PASSWORD_FILE`, default `/root/.restic-password`).
+- **Tunable env (all optional, sensible defaults):** `BACKUP_ENV_PATH`, `RCLONE_CONF_PATH`, `SYNCNO_ROOT`, `SYNCNO_DB`, `BACKUP_STAGE_DIR` (default `/mnt/backup-stage`).
+- **Endpoints** (all admin only): `GET /api/backup-settings` (current config), `POST /` (save), `POST /test` (validate connection), `POST /init` (init restic repo), `POST /run` (run a backup), `POST /enable-timer` (toggle scheduled runs), `GET /status`, `GET /download-json` (export JSON of all entities), `GET /download` (download a snapshot).
+
+A simple in-process lock guards concurrent snapshot downloads so they don't overrun the staging tmpfs.
 
 ---
 
@@ -273,6 +309,8 @@ No auto-rollback — admin decides whether to roll back or fix forward.
 | `/wiki_pages` | Wiki pages |
 | `/search` | Global search |
 | `/syncro` | Sync settings & trigger |
+| `/settings/config` | Syncro & Azure AD credentials, tab enablement (admin) |
+| `/settings/backup` | Encrypted backup configuration — restic + rclone + SharePoint (admin) |
 | `/logs` | Activity logs |
 | `/users` | User management |
 | `/login` | Azure AD login |
@@ -464,6 +502,19 @@ All list endpoints support query params:
 | DELETE | `/trigger` | Cancel in-progress sync |
 | POST | `/reset` | Reset sync state |
 | PATCH | `/synced` | Mark record synced |
+
+### Backup Settings `/backup-settings` (admin only)
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/` | Current backup config |
+| POST | `/` | Save config |
+| POST | `/test` | Validate restic/rclone connection |
+| POST | `/init` | Initialize the restic repository |
+| POST | `/run` | Run a backup snapshot |
+| POST | `/enable-timer` | Toggle scheduled backups |
+| GET | `/status` | Last run status |
+| GET | `/download-json` | Export all entities as JSON |
+| GET | `/download` | Download a snapshot archive |
 
 ### Health
 | Method | Path |
