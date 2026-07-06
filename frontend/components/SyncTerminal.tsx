@@ -157,9 +157,12 @@ export default function SyncTerminal({ onClose, storedEvents = [], apiUrl = '/ap
           } catch (_) {}
         }
         const state = progressData[entityPhase];
-        if (state && state.phase === 'detail' && (state.detail_item_index || 0) > 0) {
-          debug(`backend checkpoint: ${entityPhase} detail_item_index=${state.detail_item_index}, total=${state.detail_total}`);
-          setCheckpointOverride({ phase: entityPhase, current: state.detail_item_index || 0, total: state.detail_total || 0 });
+        // Tickets uses detail_synced as its checkpoint (detail_item_index never set);
+        // other entities use detail_item_index. Take whichever is non-zero.
+        const checkpoint = state && (state.detail_item_index || state.detail_synced || 0);
+        if (state && state.phase === 'detail' && checkpoint > 0) {
+          debug(`backend checkpoint: ${entityPhase} current=${checkpoint}, total=${state.detail_total}`);
+          setCheckpointOverride({ phase: entityPhase, current: checkpoint, total: state.detail_total || 0 });
         }
       })
       .catch(e => debug(`progress fetch err: ${e.message}`));

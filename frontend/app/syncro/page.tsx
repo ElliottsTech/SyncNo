@@ -348,8 +348,11 @@ export default function SyncroPage() {
     if (state.phase === 'catalog') {
       p.message = `catalog page ${state.last_page_synced || 0}/${state.total_pages || '?'}`;
     } else if (state.phase === 'detail') {
-      // detail_item_index is the actual DB checkpoint; detail_synced is SSE-cached and can lag
-      p.message = `detail ${state.detail_item_index || 0}/${state.detail_total || 0}`;
+      // detail_item_index is the actual DB checkpoint for most entities; detail_synced
+      // is SSE-cached and can lag. Tickets uses detail_synced as its checkpoint instead
+      // (detail_item_index never updated for tickets), so fall back to it.
+      const synced = state.detail_item_index || state.detail_synced || 0;
+      p.message = `detail ${synced}/${state.detail_total || 0}`;
     } else if (state.phase === 'paused') {
       p.status = 'paused';
       p.pause_attempt = state.pause_attempt;
@@ -492,7 +495,7 @@ export default function SyncroPage() {
                 [phase as Phase]: {
                   phase: phase as Phase,
                   status: 'cancelled',
-                  message: `cancelled at ${st.detail_item_index || 0}/${st.detail_total}`,
+                  message: `cancelled at ${st.detail_item_index || st.detail_synced || 0}/${st.detail_total}`,
                 },
               }));
             }
