@@ -7,6 +7,12 @@ import path from 'path';
 const router = Router();
 
 function requireAdmin(req, res, next) {
+  // Service key (Bearer SYNCNO_API_KEY) is admin-equivalent — used for MCP,
+  // NextAuth callbacks, and scripted sync triggers.
+  const auth = req.headers.authorization;
+  if (auth && auth.startsWith('Bearer ') && auth.slice(7) === process.env.SYNCNO_API_KEY) {
+    return next();
+  }
   if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   next();
 }
@@ -26,6 +32,15 @@ try {
   const db = getDb();
   db.prepare("ALTER TABLE tickets ADD COLUMN deleted_at TEXT DEFAULT NULL").run();
 } catch (_) {}
+// One-shot backfill: rows that already completed detail (has_detail=1) but were synced
+// before the `synced` flag was being set on detail completion. Without this they'd stay
+// red-highlighted in the UI until the next detail pass re-touches them. Idempotent —
+// only touches rows where synced hasn't been set yet.
+try {
+  const db = getDb();
+  const backfilled = db.prepare("UPDATE tickets SET synced = 1 WHERE has_detail = 1 AND synced = 0").run();
+  if (backfilled.changes > 0) console.log(`[migrate] backfilled synced=1 for ${backfilled.changes} tickets with has_detail=1`);
+} catch (e) { console.error('tickets synced backfill error:', e.message); }
 // Ensure new sync_events columns exist (migration)
 // Each ALTER in own try/catch — first failure must not skip subsequent.
 try { getDb().prepare("ALTER TABLE sync_events ADD COLUMN current_record_id TEXT").run(); } catch (_) {}
@@ -835,7 +850,9 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     if (totalPages <= 1) {
       total = page1Count;
     } else {
-      const lastPageData = await fetchJson(`${baseUrl}/${endpoint}?page=${totalPages}&per_page=100`, `${endpoint}_last_page`);
+      // policy_folders 404s with per_page — omit it.
+      const lastPageQs = endpoint === 'policy_folders' ? '' : '&per_page=100';
+      const lastPageData = await fetchJson(`${baseUrl}/${endpoint}?page=${totalPages}${lastPageQs}`, `${endpoint}_last_page`);
       const lastPageCount = (lastPageData[arrayField] || []).length;
       total = page1Count * (totalPages - 1) + lastPageCount;
     }
@@ -1046,11 +1063,14 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     if (syncSignal.aborted) throw new Error('Sync cancelled');
   }
 
-  function markDeletedTickets(seenIds) {
+  function markDeletedTickets(seenIds, includeResolved) {
     if (seenIds.size === 0) return;
     // Mark tickets that were previously synced but not seen in this catalog pass as deleted.
     // Use a temp table — batching `NOT IN` is unsafe: each batch only excludes its own
     // slice, so two batches end up marking every row.
+    // On delta syncs we skip Resolved tickets in the catalog pass, so they're never
+    // in seenIds — exclude them from deletion check too or we'd nuke every Resolved
+    // ticket with has_detail=1 on every delta run.
     const ids = Array.from(seenIds);
     db.prepare('DROP TABLE IF EXISTS _seen_ticket_ids').run();
     db.prepare('CREATE TEMP TABLE _seen_ticket_ids (id INTEGER PRIMARY KEY)').run();
@@ -1059,11 +1079,13 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
       for (const id of rows) insertSeen.run(id);
     });
     insertMany(ids);
+    const resolvedClause = includeResolved ? '' : "AND status != 'Resolved'";
     const result = db.prepare(`
       UPDATE tickets
       SET deleted_at = datetime('now')
       WHERE deleted_at IS NULL
         AND has_detail = 1
+        ${resolvedClause}
         AND NOT EXISTS (SELECT 1 FROM _seen_ticket_ids s WHERE s.id = tickets.id)
     `).run();
     db.prepare('DROP TABLE IF EXISTS _seen_ticket_ids').run();
@@ -1159,7 +1181,9 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           // Resume incomplete catalog — continue from where it stopped.
           // Rebuild seenTicketIds from DB so markDeletedTickets doesn't soft-delete
           // tickets from pages 1..lastPageSynced that we won't re-visit this run.
-          const existingRows = db.prepare("SELECT id FROM tickets WHERE status != 'Resolved' AND deleted_at IS NULL").all();
+          // Match the catalog's Resolved filter for this run type.
+          const resumeResolvedClause = isInitialSync ? '' : "AND status != 'Resolved'";
+          const existingRows = db.prepare(`SELECT id FROM tickets WHERE deleted_at IS NULL ${resumeResolvedClause}`).all();
           for (const r of existingRows) seenTicketIds.add(r.id);
           startPage = lastPageSynced + 1;
           totalPages = state.total_pages || 0;
@@ -1198,7 +1222,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
         const insertMany = db.transaction((ticketList) => {
           for (const t of ticketList) {
-            if (t.status === 'Resolved') continue;
+            if (!isInitialSync && t.status === 'Resolved') continue;
             seenTicketIds.add(t.id);
             db.prepare(`
               INSERT OR REPLACE INTO tickets (id, number, subject, status, created_at, updated_at, raw_json, has_detail, synced_at, deleted_at)
@@ -1243,7 +1267,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
         const insertMany = db.transaction((ticketList) => {
           for (const t of ticketList) {
-            if (t.status === 'Resolved') continue;
+            if (!isInitialSync && t.status === 'Resolved') continue;
             const existing = db.prepare('SELECT has_detail FROM tickets WHERE id = ?').get(t.id);
             if (existing && existing.has_detail === 1) {
               // Already fully synced — stop catalog here
@@ -1294,8 +1318,10 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
   }
 
   async function finishCatalog(state, isInitialSync) {
-    // detail_total = non-resolved tickets in DB (what detail phase will actually fetch)
-    const row = db.prepare("SELECT COUNT(*) as cnt FROM tickets WHERE status != 'Resolved' AND deleted_at IS NULL").get();
+    // detail_total = tickets in DB the detail phase will actually fetch.
+    // Initial/forceAll sync fetches everything; delta skips Resolved.
+    const detailResolvedClause = isInitialSync ? '' : "AND status != 'Resolved'";
+    const row = db.prepare(`SELECT COUNT(*) as cnt FROM tickets WHERE deleted_at IS NULL ${detailResolvedClause}`).get();
     state.detail_total = row.cnt;
     state.detail_cursor = null;
     state.detail_synced = 0;
@@ -1331,7 +1357,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
     // Mark tickets deleted in Syncro (full catalog flow only; skipCatalog can't reliably detect deletions without fetching all pages)
     if (state._seenTicketIds) {
-      markDeletedTickets(state._seenTicketIds);
+      markDeletedTickets(state._seenTicketIds, isInitialSync);
     }
 
     saveSyncState(state);
@@ -1349,13 +1375,14 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
       let synced = state.detail_synced;
       let cursor = state.detail_cursor;
 
-      // Build query - always re-fetch all non-resolved tickets to catch updates
+      // Build query. Initial/forceAll re-fetches everything; delta skips Resolved.
+      const detailResolvedClause = isInitialSync ? '' : "AND status != 'Resolved'";
       let query, params;
       if (!cursor) {
-        query = "SELECT id, status FROM tickets WHERE status != 'Resolved' AND deleted_at IS NULL ORDER BY id ASC";
+        query = `SELECT id, status FROM tickets WHERE deleted_at IS NULL ${detailResolvedClause} ORDER BY id ASC`;
         params = [];
       } else {
-        query = "SELECT id, status FROM tickets WHERE status != 'Resolved' AND deleted_at IS NULL AND id > ? ORDER BY id ASC";
+        query = `SELECT id, status FROM tickets WHERE deleted_at IS NULL ${detailResolvedClause} AND id > ? ORDER BY id ASC`;
         params = [cursor];
       }
 
@@ -1374,7 +1401,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       // Recalculate total if needed
       if (total === 0) {
-        const row = db.prepare("SELECT COUNT(*) as cnt FROM tickets WHERE status != 'Resolved' AND deleted_at IS NULL").get();
+        const row = db.prepare(`SELECT COUNT(*) as cnt FROM tickets WHERE deleted_at IS NULL ${detailResolvedClause}`).get();
         total = row.cnt;
         state.detail_total = total;
         saveSyncState(state);
@@ -1423,10 +1450,12 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           continue;
         }
 
-        // Update ticket with full detail
+        // Update ticket with full detail.
+        // synced = 1 clears the row's red "no details" highlight on the tickets list
+        // (frontend keys off `synced`, not has_detail). Catalog leaves it 0; detail sets it.
         db.prepare(`
           UPDATE tickets
-          SET raw_json = ?, has_detail = 1, synced_at = datetime('now'), updated_at = ?,
+          SET raw_json = ?, has_detail = 1, synced = 1, synced_at = datetime('now'), updated_at = ?,
               subject = ?, status = ?, number = ?, customer_id = ?, customer_business_then_name = ?,
               due_date = ?, resolved_at = ?, start_at = ?, end_at = ?, location_id = ?,
               problem_type = ?, ticket_type_id = ?, user_id = ?, pdf_url = ?, priority = ?,
@@ -2725,6 +2754,8 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     // Some Syncro endpoints (appointments) return no meta.total_pages and ignore per_page.
     // paginateUntilEmpty: keep fetching pages until a page returns 0 records or all-dup IDs.
     paginateUntilEmpty = false,
+    // policy_folders 404s when per_page is sent — omit it and rely on meta.total_pages.
+    omitPerPage = false,
   }) {
     emitEvent({ phase: entity, status: 'started' }, res);
     const localMax = forceAll ? null : (lastSyncKey ? getSetting(lastSyncKey) : (getSetting('last_sync') || null));
@@ -2734,8 +2765,10 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     let latestUpdatedAt = localMax;
     let inserts = 0;
 
-    const qs = (extraParams ? extraParams + '&' : '') + `per_page=${perPage}`;
-    const pageUrl = (p) => `${baseUrl}/${endpoint}?page=${p}&${qs}`;
+    const qs = omitPerPage
+      ? (extraParams || '')
+      : (extraParams ? extraParams + '&' : '') + `per_page=${perPage}`;
+    const pageUrl = (p) => `${baseUrl}/${endpoint}?page=${p}${qs ? '&' + qs : ''}`;
 
     try {
       const page1 = await fetchJson(pageUrl(1), entity);
@@ -2990,6 +3023,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
         r.id, r.name || '', r.customer_id || null, r.asset_id || null,
         r.description || '', r.created_at || '', r.updated_at || '',
       ],
+      omitPerPage: true,
     });
   }
 
