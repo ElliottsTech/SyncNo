@@ -29,26 +29,30 @@ import systemRouter from './routes/system.js';
 import backupSettingsRouter from './routes/backup_settings.js';
 import { startAnalytics } from './analytics.js';
 import { isDemo, DEMO_USER } from './demo.js';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, '..', '.env');
-const env = Object.fromEntries(
-  readFileSync(envPath, 'utf8').trim().split('\n').map(l => {
-    const i = l.indexOf('=');
-    return i === -1 ? [l] : [l.slice(0, i), l.slice(i + 1)];
-  })
-);
-for (const [key, value] of Object.entries(env)) {
-  if (process.env[key] === undefined) process.env[key] = value;
+// Tolerate a missing .env — Docker/managed deployments get env from the compose
+// environment: block, not a .env file. Only load .env if it exists (dev/local).
+if (existsSync(envPath)) {
+  const env = Object.fromEntries(
+    readFileSync(envPath, 'utf8').trim().split('\n').map(l => {
+      const i = l.indexOf('=');
+      return i === -1 ? [l] : [l.slice(0, i), l.slice(i + 1)];
+    })
+  );
+  for (const [key, value] of Object.entries(env)) {
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
 }
 const NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET;
 const SYNCNO_API_KEY = process.env.SYNCNO_API_KEY;
 
 const app = express();
-const PORT = 3002;
+const PORT = parseInt(process.env.PORT || '3002', 10);
 
 // Same-origin via Next.js rewrite in prod, but allow configured origin for direct dev.
 const corsOrigin = process.env.CORS_ORIGIN || false;
@@ -144,7 +148,7 @@ app.use('/api/attachments', express.static(attachmentsDir, {
 }));
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', version: process.env.APP_VERSION || 'unknown' });
 });
 
 app.listen(PORT, () => {

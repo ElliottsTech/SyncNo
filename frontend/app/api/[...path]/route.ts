@@ -19,9 +19,16 @@ async function proxy(req: NextRequest, ctx: { params: { path: string[] } }) {
   const url = `${BACKEND}/api/${path}${req.nextUrl.search}`;
 
   const headers = new Headers();
+  // Hop-by-hop headers must not be forwarded (RFC 7230 §6.1). The tenant nginx
+  // sets Connection: upgrade for WebSocket support, and forwarding it into the
+  // outbound fetch makes undici reject the request (502 "fetch failed").
+  const HOP_BY_HOP = new Set([
+    'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+    'te', 'trailers', 'transfer-encoding', 'upgrade', 'host', 'content-length',
+  ]);
   req.headers.forEach((value, key) => {
-    // Drop hop-by-hop / Next.js-internal headers
     if (key.startsWith('next-')) return;
+    if (HOP_BY_HOP.has(key.toLowerCase())) return;
     headers.set(key, value);
   });
 

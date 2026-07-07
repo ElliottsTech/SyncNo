@@ -31,6 +31,11 @@ function compareSemver(a, b) {
 }
 
 async function readCurrentVersion() {
+  // Prefer the APP_VERSION env var (set at provision/build time). Falls back to
+  // the VERSION file on disk (the original mechanism for bare-metal installs).
+  if (process.env.APP_VERSION) {
+    return process.env.APP_VERSION.split('·')[0].trim();
+  }
   try {
     const v = (await readFile(VERSION_FILE, 'utf8')).trim();
     return v || null;
