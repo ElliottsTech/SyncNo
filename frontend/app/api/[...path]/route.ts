@@ -63,3 +63,7 @@ async function proxy(req: NextRequest, ctx: { params: { path: string[] } }) {
 }
 
 export { proxy as GET, proxy as POST, proxy as PUT, proxy as DELETE, proxy as PATCH };
+
+// Force dynamic rendering — never cache this route's output (Next.js 14 caches
+// fetch-based route handlers by default, which would serve stale API responses).
+export const dynamic = 'force-dynamic';
