@@ -4,6 +4,7 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import RawJsonView from '../../../components/RawJsonView';
 import { usePageTitle } from '../../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
@@ -26,16 +27,18 @@ function CollapsibleSection({ title, children }: { title: string; children: Reac
 export default function AssetDetail() {
   const { id } = useParams();
   const [asset, setAsset] = useState<any>(null);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
     if (!id) return;
-    fetch(`${API}/assets/${id}`)
-      .then(r => r.json())
-      .then(setAsset);
+    fetchJson(`${API}/assets/${id}`)
+      .then(setAsset)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
   }, [id]);
 
   usePageTitle(asset ? `${asset.name || 'Asset'} — Syncno` : null);
 
+  if (notFound) return <p className="text-gray-500">Failed to load asset.</p>;
   if (!asset) return <p className="text-gray-500">Loading...</p>;
 
   const props = asset.properties || {};
@@ -53,13 +56,15 @@ export default function AssetDetail() {
                 type="checkbox"
                 checked={!!asset.synced}
                 onChange={async (e) => {
-                  await fetch(`${API}/sync/synced`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ table: 'assets', id: asset.id, synced: !asset.synced }),
-                  });
-                  const res = await fetch(`${API}/assets/${id}`).then(r => r.json());
-                  setAsset(res);
+                  try {
+                    await fetchJson(`${API}/sync/synced`, {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ table: 'assets', id: asset.id, synced: !asset.synced }),
+                    });
+                    const res = await fetchJson(`${API}/assets/${id}`);
+                    setAsset(res);
+                  } catch (err) { if (!(err instanceof UnauthorizedError)) { /* keep current state */ } }
                 }}
                 className="w-5 h-5 cursor-pointer mt-1"
                 title={asset.synced ? 'Synced — click to force re-sync' : 'Not synced'}

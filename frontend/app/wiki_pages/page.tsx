@@ -5,6 +5,7 @@ import DataTable from '../../components/DataTable';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
 import { usePageTitle } from '../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../lib/fetch';
 
 const API = '/api';
 
@@ -25,9 +26,9 @@ export default function WikiPagesPage() {
       .filter(([_, v]) => v)
       .map(([k, v]) => `&filter_${k}=${encodeURIComponent(v)}`)
       .join('');
-    fetch(`${API}/wiki_pages?page=${page}&limit=50${sort}${colFilters}`)
-      .then(r => r.json())
-      .then(d => { setRows(d.data); setPagination(d.pagination); setLoading(false); });
+    fetchJson(`${API}/wiki_pages?page=${page}&limit=50${sort}${colFilters}`)
+      .then(d => { setRows(d.data || []); setPagination(d.pagination || { page: 1, limit: 50, total: 0 }); setLoading(false); })
+      .catch(e => { if (!(e instanceof UnauthorizedError)) { setRows([]); setLoading(false); } });
   }, [listState]);
 
   useEffect(() => { fetchRows(); }, [fetchRows]);

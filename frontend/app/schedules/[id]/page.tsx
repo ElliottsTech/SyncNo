@@ -6,6 +6,7 @@ import Badge from '../../../components/Badge';
 import RawJsonView from '../../../components/RawJsonView';
 import CollapsibleSection from '../../../components/CollapsibleSection';
 import { usePageTitle } from '../../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
@@ -36,13 +37,17 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 export default function ScheduleDetail() {
   const { id } = useParams();
   const [row, setRow] = useState<any>(null);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/schedules/${id}`).then(r => r.json()).then(setRow);
+    fetchJson(`${API}/schedules/${id}`)
+      .then(setRow)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
   }, [id]);
 
   usePageTitle(row ? `${row.name || 'Schedule'} — Syncno` : null);
 
+  if (notFound) return <p className="text-gray-500">Failed to load schedule.</p>;
   if (!row) return <p className="text-gray-500">Loading...</p>;
 
   const p = row.parsed || {};

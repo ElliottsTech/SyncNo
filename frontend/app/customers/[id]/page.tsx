@@ -6,6 +6,7 @@ import Badge from '../../../components/Badge';
 import DataTable from '../../../components/DataTable';
 import RawJsonView from '../../../components/RawJsonView';
 import { usePageTitle } from '../../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
@@ -42,26 +43,29 @@ export default function CustomerDetail() {
   // Load all data in parallel on mount
   useEffect(() => {
     Promise.all([
-      fetch(`${API}/customers/${id}`).then(r => r.json()),
-      fetch(`${API}/customers/${id}/tickets?limit=500`).then(r => r.json()),
-      fetch(`${API}/customers/${id}/assets`).then(r => r.json()),
-      fetch(`${API}/customers/${id}/invoices`).then(r => r.json()),
-      fetch(`${API}/customers/${id}/estimates`).then(r => r.json()),
-      fetch(`${API}/customers/${id}/payments`).then(r => r.json()),
-      fetch(`${API}/customers/${id}/contacts`).then(r => r.json()),
-      fetch(`${API}/customers/${id}/schedules`).then(r => r.json()),
-      fetch(`${API}/customers/${id}/policies`).then(r => r.json()),
+      fetchJson(`${API}/customers/${id}`),
+      fetchJson(`${API}/customers/${id}/tickets?limit=500`),
+      fetchJson(`${API}/customers/${id}/assets`),
+      fetchJson(`${API}/customers/${id}/invoices`),
+      fetchJson(`${API}/customers/${id}/estimates`),
+      fetchJson(`${API}/customers/${id}/payments`),
+      fetchJson(`${API}/customers/${id}/contacts`),
+      fetchJson(`${API}/customers/${id}/schedules`),
+      fetchJson(`${API}/customers/${id}/policies`),
     ]).then(([cust, tkt, ast, inv, est, pay, con, sch, pol]) => {
       setCustomer(cust);
       setTickets(tkt.data || []);
-      setAssets(ast);
-      setInvoices(inv);
-      setEstimates(est);
-      setPayments(pay);
-      setContacts(con);
-      setSchedules(sch);
+      setAssets(Array.isArray(ast) ? ast : []);
+      setInvoices(Array.isArray(inv) ? inv : []);
+      setEstimates(Array.isArray(est) ? est : []);
+      setPayments(Array.isArray(pay) ? pay : []);
+      setContacts(Array.isArray(con) ? con : []);
+      setSchedules(Array.isArray(sch) ? sch : []);
       setPolicies(pol);
       setLoaded(true);
+    }).catch(e => {
+      // UnauthorizedError already triggered a redirect; otherwise keep empty.
+      if (!(e instanceof UnauthorizedError)) setLoaded(true);
     });
   }, [id]);
 
@@ -94,13 +98,15 @@ export default function CustomerDetail() {
             type="checkbox"
             checked={!!customer.synced}
             onChange={async (e) => {
-              await fetch(`${API}/sync/synced`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ table: 'customers', id: customer.id, synced: !customer.synced }),
-              });
-              const res = await fetch(`${API}/customers/${id}`).then(r => r.json());
-              setCustomer(res);
+              try {
+                await fetchJson(`${API}/sync/synced`, {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ table: 'customers', id: customer.id, synced: !customer.synced }),
+                });
+                const res = await fetchJson(`${API}/customers/${id}`);
+                setCustomer(res);
+              } catch (err) { if (!(err instanceof UnauthorizedError)) { /* keep current state */ } }
             }}
             className="w-5 h-5 cursor-pointer"
             title={customer.synced ? 'Synced — click to mark for re-sync' : 'Not fully synced'}

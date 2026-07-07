@@ -6,19 +6,24 @@ import Badge from '../../../components/Badge';
 import RawJsonView from '../../../components/RawJsonView';
 import CollapsibleSection from '../../../components/CollapsibleSection';
 import { usePageTitle } from '../../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
 export default function ContractDetail() {
   const { id } = useParams();
   const [row, setRow] = useState<any>(null);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/contracts/${id}`).then(r => r.json()).then(setRow);
+    fetchJson(`${API}/contracts/${id}`)
+      .then(setRow)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
   }, [id]);
 
   usePageTitle(row ? `${row.name || 'Contract'} — Syncno` : null);
 
+  if (notFound) return <p className="text-gray-500">Failed to load contract.</p>;
   if (!row) return <p className="text-gray-500">Loading...</p>;
 
   return (

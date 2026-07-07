@@ -6,6 +6,7 @@ import DataTable from '../../components/DataTable';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
 import { usePageTitle } from '../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../lib/fetch';
 
 const API = '/api';
 
@@ -29,14 +30,13 @@ export default function ProductsPage() {
       .filter(([, v]) => v)
       .map(([k, v]) => `&filter_${k}=${encodeURIComponent(v)}`)
       .join('');
-    fetch(`${API}/products?page=${page}&limit=50${sort}${colFilters}`)
-      .then(r => r.json())
+    fetchJson(`${API}/products?page=${page}&limit=50${sort}${colFilters}`)
       .then(d => {
         setProducts(d.data || []);
-        setPagination(d.pagination);
+        setPagination(d.pagination || { page: 1, limit: 50, total: 0 });
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(e => { if (!(e instanceof UnauthorizedError)) { setProducts([]); setLoading(false); } });
   }, [listState]);
 
   useEffect(() => {

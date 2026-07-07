@@ -6,6 +6,7 @@ import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
 import { usePageTitle } from '../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../lib/fetch';
 
 const API = '/api';
 
@@ -75,13 +76,13 @@ export default function TicketsPage() {
       .filter(([_, v]) => v)
       .map(([k, v]) => `&filter_${k}=${encodeURIComponent(v)}`)
       .join('');
-    fetch(`${API}/tickets?page=${page}&limit=100${sort}${colFilters}`)
-      .then(r => r.json())
+    fetchJson(`${API}/tickets?page=${page}&limit=100${sort}${colFilters}`)
       .then(d => {
-        setTickets(d.data);
-        setPagination(d.pagination);
+        setTickets(d.data || []);
+        setPagination(d.pagination || { page: 1, limit: 100, total: 0 });
         setLoading(false);
-      });
+      })
+      .catch(e => { if (!(e instanceof UnauthorizedError)) { setTickets([]); setLoading(false); } });
   }, [listState]);
 
   useEffect(() => {

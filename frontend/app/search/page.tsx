@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import { usePageTitle } from '../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../lib/fetch';
 
 const API = '/api';
 
@@ -85,9 +86,12 @@ export default function SearchPage() {
     setLoading(true);
     const params = new URLSearchParams({ q });
     if (types.length > 0) params.set('type', types.join(','));
-    const res = await fetch(`${API}/search?${params.toString()}`);
-    const data = await res.json();
-    setResults(data.data || []);
+    try {
+      const data = await fetchJson(`${API}/search?${params.toString()}`);
+      setResults(data.data || []);
+    } catch (e) {
+      if (!(e instanceof UnauthorizedError)) setResults([]);
+    }
     setLoading(false);
   }, []);
 

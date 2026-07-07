@@ -4,19 +4,24 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import RawJsonView from '../../../components/RawJsonView';
 import { usePageTitle } from '../../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
 export default function AppointmentTypeDetail() {
   const { id } = useParams();
   const [row, setRow] = useState<any>(null);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/appointment_types/${id}`).then(r => r.json()).then(setRow);
+    fetchJson(`${API}/appointment_types/${id}`)
+      .then(setRow)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
   }, [id]);
 
   usePageTitle(row ? `${row.name} — Syncno` : null);
 
+  if (notFound) return <p className="text-gray-500">Failed to load appointment type.</p>;
   if (!row) return <p className="text-gray-500">Loading...</p>;
 
   return (

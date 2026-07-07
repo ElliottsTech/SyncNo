@@ -6,6 +6,7 @@ import Pagination from '../../components/Pagination';
 import AppointmentCalendar from '../../components/AppointmentCalendar';
 import { useListState } from '../../lib/useUrlState';
 import { usePageTitle } from '../../lib/usePageTitle';
+import { fetchJson, UnauthorizedError } from '../../lib/fetch';
 
 const API = '/api';
 
@@ -31,19 +32,19 @@ export default function AppointmentsPage() {
       .filter(([_, v]) => v)
       .map(([k, v]) => `&filter_${k}=${encodeURIComponent(v)}`)
       .join('');
-    fetch(`${API}/appointments?page=${page}&limit=50${sort}${colFilters}`)
-      .then(r => r.json())
+    fetchJson(`${API}/appointments?page=${page}&limit=50${sort}${colFilters}`)
       .then(d => {
-        setAppointments(d.data);
-        setPagination(d.pagination);
+        setAppointments(d.data || []);
+        setPagination(d.pagination || { page: 1, limit: 50, total: 0 });
         setLoading(false);
-      });
+      })
+      .catch(e => { if (!(e instanceof UnauthorizedError)) { setAppointments([]); setLoading(false); } });
   }, [listState]);
 
   const fetchAllForCalendar = useCallback(() => {
-    fetch(`${API}/appointments?page=1&limit=500&sortCol=start_at&sortDir=desc`)
-      .then(r => r.json())
-      .then(d => setAllForCalendar(d.data || []));
+    fetchJson(`${API}/appointments?page=1&limit=500&sortCol=start_at&sortDir=desc`)
+      .then(d => setAllForCalendar(d.data || []))
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setAllForCalendar([]); });
   }, []);
 
   useEffect(() => {

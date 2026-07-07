@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePageTitle } from '../../../lib/usePageTitle';
 import Badge from '../../../components/Badge';
 import RawJsonView from '../../../components/RawJsonView';
+import { fetchJson, UnauthorizedError } from '../../../lib/fetch';
 
 const API = '/api';
 
@@ -12,18 +13,20 @@ export default function InvoiceDetail() {
   const { id } = useParams();
   const [invoice, setInvoice] = useState<any>(null);
   const [linkedTicket, setLinkedTicket] = useState<{ ticket_id: string | null; ticket: any | null } | null>(null);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/invoices/${id}`)
-      .then(r => r.json())
-      .then(setInvoice);
-    fetch(`${API}/invoices/${id}/ticket`)
-      .then(r => r.json())
-      .then(setLinkedTicket);
+    fetchJson(`${API}/invoices/${id}`)
+      .then(setInvoice)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setNotFound(true); });
+    fetchJson(`${API}/invoices/${id}/ticket`)
+      .then(setLinkedTicket)
+      .catch(e => { if (!(e instanceof UnauthorizedError)) setLinkedTicket(null); });
   }, [id]);
 
   usePageTitle(invoice ? `Invoice #${invoice.number} — Syncno` : null);
 
+  if (notFound) return <p className="text-gray-500">Failed to load invoice.</p>;
   if (!invoice) return <p className="text-gray-500">Loading...</p>;
 
   const raw = invoice.raw_json ? (typeof invoice.raw_json === 'string' ? JSON.parse(invoice.raw_json) : invoice.raw_json) : null;
@@ -54,13 +57,15 @@ export default function InvoiceDetail() {
               type="checkbox"
               checked={!!invoice.synced}
               onChange={async (e) => {
-                await fetch(`${API}/sync/synced`, {
-                  method: 'PATCH',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ table: 'invoices', id: invoice.id, synced: !invoice.synced }),
-                });
-                const res = await fetch(`${API}/invoices/${id}`).then(r => r.json());
-                setInvoice(res);
+                try {
+                  await fetchJson(`${API}/sync/synced`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ table: 'invoices', id: invoice.id, synced: !invoice.synced }),
+                  });
+                  const res = await fetchJson(`${API}/invoices/${id}`);
+                  setInvoice(res);
+                } catch (err) { if (!(err instanceof UnauthorizedError)) { /* keep current state */ } }
               }}
               className="w-5 h-5 cursor-pointer mt-1"
               title={invoice.synced ? 'Synced — click to force re-sync' : 'Not synced'}
