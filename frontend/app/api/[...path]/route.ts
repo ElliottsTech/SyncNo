@@ -36,7 +36,9 @@ async function proxy(req: NextRequest, ctx: { params: { path: string[] } }) {
     method: req.method,
     headers,
     redirect: 'manual',
-  };
+    // Next.js 14 caches fetch() by default — never cache proxied API calls.
+    cache: 'no-store',
+  } as RequestInit;
 
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     init.body = await req.text();
