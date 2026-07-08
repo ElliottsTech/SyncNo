@@ -805,9 +805,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     if (totalPages <= 1) {
       total = page1Count;
     } else {
-      // policy_folders 404s with per_page — omit it.
-      const lastPageQs = endpoint === 'policy_folders' ? '' : '&per_page=100';
-      const lastPageData = await fetchJson(`${baseUrl}/${endpoint}?page=${totalPages}${lastPageQs}`, `${endpoint}_last_page`);
+      const lastPageData = await fetchJson(`${baseUrl}/${endpoint}?page=${totalPages}&per_page=100`, `${endpoint}_last_page`);
       const lastPageCount = (lastPageData[arrayField] || []).length;
       total = page1Count * (totalPages - 1) + lastPageCount;
     }
@@ -2709,8 +2707,6 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     // Some Syncro endpoints (appointments) return no meta.total_pages and ignore per_page.
     // paginateUntilEmpty: keep fetching pages until a page returns 0 records or all-dup IDs.
     paginateUntilEmpty = false,
-    // policy_folders 404s when per_page is sent — omit it and rely on meta.total_pages.
-    omitPerPage = false,
   }) {
     emitEvent({ phase: entity, status: 'started' }, res);
     const localMax = forceAll ? null : (lastSyncKey ? getSetting(lastSyncKey) : (getSetting('last_sync') || null));
@@ -2720,10 +2716,8 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     let latestUpdatedAt = localMax;
     let inserts = 0;
 
-    const qs = omitPerPage
-      ? (extraParams || '')
-      : (extraParams ? extraParams + '&' : '') + `per_page=${perPage}`;
-    const pageUrl = (p) => `${baseUrl}/${endpoint}?page=${p}${qs ? '&' + qs : ''}`;
+    const qs = (extraParams ? extraParams + '&' : '') + `per_page=${perPage}`;
+    const pageUrl = (p) => `${baseUrl}/${endpoint}?page=${p}&${qs}`;
 
     try {
       const page1 = await fetchJson(pageUrl(1), entity);
@@ -2966,20 +2960,119 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     });
   }
 
+  // GET /policy_folders has NO global list endpoint — Syncro requires a
+  // mandatory customer_id query param (the spec marks it required, and omitting
+  // it returns 404 {"errors":["Customer not found"]}). So we iterate every
+  // locally-synced customer and paginate their folders.
   async function syncPolicyFolders() {
-    return syncGenericEntity({
-      entity: 'policy_folders',
-      endpoint: 'policy_folders',
-      arrayField: 'policy_folders',
-      insertSql: `INSERT OR REPLACE INTO policy_folders
+    emitEvent({ phase: 'policy_folders', status: 'started' }, res);
+    const insertSql = `INSERT OR REPLACE INTO policy_folders
         (id, name, customer_id, asset_id, description, created_at, updated_at, raw_json, synced)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-      mapRow: r => [
-        r.id, r.name || '', r.customer_id || null, r.asset_id || null,
-        r.description || '', r.created_at || '', r.updated_at || '',
-      ],
-      omitPerPage: true,
-    });
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`;
+    const mapRow = r => [
+      r.id, r.name || '', r.customer_id || null, r.asset_id || null,
+      r.description || '', r.created_at || '', r.updated_at || '',
+    ];
+
+    const state = getSyncState('policy_folders');
+    const customers = db.prepare('SELECT id, business_name, fullname FROM customers ORDER BY id').all();
+    const customerCount = customers.length;
+    // Resume offset: detail_item_index stores the customer index we resume at.
+    const resumeOffset = forceAll ? 0 : (state.detail_item_index || 0);
+    let absoluteIndex = 0;
+    let inserts = 0;
+
+    state.phase = 'detail';
+    state.detail_total = customerCount;
+    state.total_to_sync = customerCount;
+    state.detail_synced = 0;
+    if (forceAll) {
+      state.detail_page = 1;
+      state.detail_item_index = 0;
+    }
+    saveSyncState(state);
+
+    try {
+      for (let ci = 0; ci < customerCount; ci++) {
+        checkAbort();
+        const cust = customers[ci];
+        absoluteIndex++;
+        if (absoluteIndex <= resumeOffset) continue;
+
+        state.detail_page = ci + 1;
+        state.detail_item_index = absoluteIndex;
+        state.detail_synced = absoluteIndex - 1;
+        state.detail_total = customerCount;
+        state.total_to_sync = customerCount;
+        saveSyncState(state);
+        const custLabel = cust.business_name || cust.fullname || `customer ${cust.id}`;
+        emitEvent({
+          phase: 'policy_folders', status: 'progress',
+          current: ci + 1, total: customerCount,
+          currentRecordId: cust.id,
+          currentRecordName: custLabel,
+          subphase: 'customer',
+        }, res);
+
+        let page = 1;
+        let totalPages = 1;
+        while (true) {
+          checkAbort();
+          const url = `${baseUrl}/policy_folders?customer_id=${cust.id}&page=${page}&per_page=100`;
+          const data = await fetchJson(url, 'policy_folders');
+          const records = data.policy_folders || [];
+          totalPages = data.meta?.total_pages || totalPages;
+
+          for (const r of records) {
+            checkAbort();
+            const existing = db.prepare('SELECT id FROM policy_folders WHERE id = ?').get(r.id);
+            try {
+              db.prepare(insertSql).run(...mapRow(r), JSON.stringify(r));
+              if (!existing) inserts++;
+            } catch (insertErr) {
+              if (syncSignal.aborted) throw new Error('Sync cancelled');
+              results.errors = results.errors || [];
+              results.errors.push(`policy_folders/${r.id}: ${insertErr.message}`);
+            }
+            emitEvent({
+              phase: 'policy_folders', status: 'progress',
+              current: ci + 1, total: customerCount,
+              currentRecordId: r.id,
+              currentRecordName: r.name || custLabel,
+              subphase: 'folder',
+            }, res);
+            await new Promise((resolve, reject) => {
+              const t = setTimeout(resolve, 350);
+              syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
+            }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+          }
+
+          if (records.length === 0 || page >= totalPages) break;
+          page++;
+          if (page > 1000) break; // safety
+        }
+      }
+
+      results.policy_folders = inserts;
+      results.policy_foldersInserted = inserts;
+      state.phase = 'idle';
+      state.detail_page = 1;
+      state.detail_item_index = 0;
+      state.last_result_count = inserts;
+      state.last_result_error = null;
+      saveSyncState(state);
+      log('SYNC_ENTITY', `policy_folders: ${customerCount} customers visited, ${inserts} inserted`);
+      emitEvent({ phase: 'policy_folders', status: 'done', count: inserts }, res);
+      clearEventsForEntity('policy_folders');
+    } catch (e) {
+      state.phase = 'error';
+      state.last_result_error = e.message;
+      saveSyncState(state);
+      results.errors = results.errors || [];
+      results.errors.push(`policy_folders: ${e.message}`);
+      log('SYNC_ERROR', e.message);
+      emitEvent({ phase: 'policy_folders', status: 'error', error: e.message }, res);
+    }
   }
 
   async function syncPortalUsers() {
