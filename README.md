@@ -569,3 +569,6 @@ All list endpoints support query params:
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | GET | `/version` | Admin only | `{ current, latest, updateAvailable }`. Pass `?refresh=true` to bypass cache. |
+
+MCP added:
+<img width="771" height="708" alt="image" src="https://github.com/user-attachments/assets/7bf1abb2-f0a3-4005-825e-8b60bda360f5" />
