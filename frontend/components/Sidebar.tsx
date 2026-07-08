@@ -49,6 +49,8 @@ const navItems: NavItem[] = [
   {
     href: '/syncro', label: 'Settings', allLabel: 'Sync', children: [
       { href: '/settings/config', label: 'Config' },
+      { href: '/settings/company', label: 'Company' },
+      { href: '/settings/pdf-templates', label: 'PDF Templates' },
       { href: '/settings/backup', label: 'Backup' },
       { href: '/settings/mcp', label: 'MCP' },
     ],

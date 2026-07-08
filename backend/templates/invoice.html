@@ -1,0 +1,621 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+	<meta http-equiv="Content-type" content="text/html; charset=utf-8"/>
+	<title>Tax Invoice</title>
+	<style type="text/css">html, body {
+      font-family: Arial, "Arial Unicode", "Arial Unicode MS", Helvetica, sans-serif;
+      font-size: 12px;
+      line-height: 16px;
+      word-wrap: break-word;
+    }
+
+    .print-container {
+      clear: both;
+      /*Do something here with A4*/
+      padding: 0px 40px 0px 40px;
+      z-index: 0;
+    }
+
+    .print-title {
+      font-family: Arial, "Arial Unicode", "Arial Unicode MS", Helvetica, sans-serif;
+      position: absolute;
+      top: 0;
+      margin-left: 0.5in;
+      border: solid 1px #f1f1f1;
+      padding: 3px 5px;
+    }
+
+    .clearb {
+      clear: both;
+    }
+
+    .invheader {
+      min-height: 230px;
+      position: relative;
+    }
+
+    .invheader-upper {
+      z-index: 10;
+      position: relative;
+      margin-left: 0.10in;
+      min-height: 90px;
+    }
+
+    .invheader-lower {
+      clear: both;
+      margin-top: 20px;
+      margin-left: 0.01in;
+      min-height: 100px;
+    }
+
+    .invheader-address-account {
+      float: left;
+      width: 300px;
+      margin-bottom: 20px;
+    }
+
+    .invheader-logo {
+      float: right;
+    }
+
+    .invheader-logo-container {
+      width: 250px;
+      height: 90px;
+      float: right;
+    }
+
+    .invheader-address-client {
+      float: left;
+      width: 300px;
+      padding-bottom: 20px;
+    }
+
+    .invheader-invoicedetails {
+      float: right;
+      width: 300px;
+      padding-bottom: 20px;
+      padding-left: 20px;
+      page-break-inside: avoid;
+    }
+
+    .invheader-invoicedetails table {
+      width: 100%;
+    }
+
+    .invbody {
+      clear: both;
+      position: relative;
+      overflow: auto;
+    }
+
+    .invheader,
+    .invheader th,
+    .invbody,
+    .invbody .description,
+    .invstub th,
+    .invheader-invoicedetails th,
+    .attachment-header th, {
+      font-family: Arial, "Arial Unicode", "Arial Unicode MS", Helvetica, sans-serif;
+      font-size: 12px;
+      line-height: 18px;
+      text-align: left;
+    }
+
+    .invheader-logo {
+      text-align: center;
+      font-size: 11px;
+      line-height: 12px;
+    }
+
+    .attachment-image img {
+      max-height: 9in;
+      max-width: 100%;
+    }
+
+    .invheader-invoicedetails table th {
+      width: 50%;
+      font-weight: normal;
+      white-space: nowrap;
+      text-align: left;
+    }
+
+    .invheader-invoicedetails table td,
+    .attachment-header td {
+      text-align: right;
+      font-family: Arial, "Arial Unicode", "Arial Unicode MS", Helvetica, sans-serif;
+      font-size: 12px;
+      line-height: 18px;
+    }
+
+    .invheader-invoicedetails th, .invheader-invoicedetails td {
+      padding: 0px 5px;
+    }
+
+    .invheader-invoicedetails-balance th, .invheader-invoicedetails-balance td,
+    .attachment-header th, .attachment-header td {
+      background-color: #198da2;
+      border-top: solid 0px #c7c7c7;
+      border-bottom: solid 0px #c7c7c7;
+      padding: 0px;
+      font-weight: bold;
+    }
+
+    .attachment-header td {
+      font-weight: normal;
+    }
+
+    .attachment-header th, .attachment-header td {
+      vertical-align: top;
+    }
+
+    .invheader-invoicedetails .invheader-invoicedetails-balance th, .attachment-header th {
+      border-left: solid 1px #c7c7c7;
+    }
+
+    .invheader-invoicedetails .invheader-invoicedetails-balance td, .attachment-header td {
+      border-right: solid 1px #c7c7c7;
+    }
+
+    .invheader-invoicedetails .invheader-invoicedetails-balance th div, .attachment-header th div {
+      border-left: solid 1px #f1f1f1;
+      border-top: solid 1px #f1f1f1;
+      padding: 3px 5px;
+    }
+
+    .invheader-invoicedetails .invheader-invoicedetails-balance td div, .attachment-header td div {
+      border-top: solid 1px #f1f1f1;
+      padding: 3px 5px;
+    }
+
+    /*
+     * 		TABLE
+     */
+
+    .invbody-items.worksheet-table {
+      width: 32%;
+    }
+
+    .invbody-items {
+      width: 100%;
+      margin-bottom: 24px;
+    }
+
+    .invbody-items td, .invbody-expenses td, .invbody-timeentries td {
+      vertical-align: top;
+    }
+
+    .invbody-items thead, .invbody-expenses thead, .invbody-timeentries thead {
+      font-weight: bold;
+      page-break-after: avoid;
+    }
+
+    .invbody-items tbody, .invbody-expenses tbody, .invbody-timeentries tbody {
+      page-break-before: avoid;
+      vertical-align: top;
+    }
+
+    .invbody-items td, .invbody-expenses td, .invbody-timeentries td {
+      padding: 3px 0px 3px 2px;
+      border-bottom: solid 1px #e5e5e5;
+    }
+
+    .invbody-items th, .invbody-expenses th, .invbody-timeentries th {
+      background-color: #198da2;
+      line-height: normal;
+      border-top: solid 0px #c7c7c7;
+      border-bottom: solid 0px #c7c7c7;
+      vertical-align: top;
+    }
+
+    .invbody-items th div, .invbody-expenses th div, .invbody-timeentries th div {
+      padding: 5px 0;
+    }
+
+    .invbody-items th.first, .invbody-expenses th.first, .invbody-timeentries th.first {
+      border-left: solid 1px #c7c7c7;
+    }
+
+    .invbody-items th.last, .invbody-expenses th.last, .invbody-timeentries th.last {
+      border-right: solid 1px #c7c7c7;
+    }
+
+    /*
+     * 		ITEMS TABLE
+     */
+    .invbody-items thead .item {
+      border-left: solid 0px #f1f1f1;
+      border-top: solid 0px #f1f1f1;
+      padding-left: 5px;
+      text-align: left;
+    }
+
+    .invbody-items tbody .item {
+      padding-left: 5px;
+      text-align: left;
+    }
+
+    .invbody-items thead .description {
+      border-top: solid 0px #f1f1f1;
+      text-align: left;
+    }
+
+    .invbody-items thead .unitcost {
+      border-top: solid 0px #f1f1f1;
+      text-align: right;
+    }
+
+    .invbody-items tbody .unitcost {
+      text-align: right;
+    }
+
+    .invbody-items thead .quantity {
+      border-top: solid 0px #f1f1f1;
+      text-align: right;
+      padding-right: 5px;
+    }
+
+    .invbody-items tbody .quantity {
+      text-align: right;
+      padding-right: 5px;
+    }
+
+    .invbody-items thead .linetotal {
+      border-top: solid 0px #f1f1f1;
+      text-align: right;
+      padding-right: 5px;
+    }
+
+    .invbody-items tbody .linetotal {
+      text-align: right;
+      padding-right: 5px;
+    }
+
+    /*
+     * 		EXPENSE TABLE
+     */
+
+    .invbody-expenses thead .description {
+      border-left: solid 0px #f1f1f1;
+      border-top: solid 0px #f1f1f1;
+      padding-left: 5px;
+      text-align: left;
+    }
+
+    .invbody-expenses tbody .description {
+      padding-left: 5px;
+      text-align: left;
+    }
+
+    .invbody-expenses thead .unitcost {
+      border-top: solid 0px #f1f1f1;
+      text-align: right;
+    }
+
+    .invbody-expenses tbody .unitcost {
+      text-align: right;
+    }
+
+    .invbody-expenses thead .quantity {
+      border-top: solid 0px #f1f1f1;
+      text-align: right;
+    }
+
+    .invbody-expenses tbody .quantity {
+      text-align: right;
+    }
+
+    .invbody-expenses thead .linetotal {
+      border-top: solid 0px #f1f1f1;
+      text-align: right;
+      padding-right: 5px;
+    }
+
+    .invbody-expenses tbody .linetotal {
+      text-align: right;
+      padding-right: 5px;
+    }
+
+    /*
+     * 		TIME ENTRIES TABLE
+     */
+
+    .invbody-timeentries thead .notes {
+      border-left: solid 1px #f1f1f1;
+      border-top: solid 1px #f1f1f1;
+      padding-left: 5px;
+      text-align: left;
+    }
+
+    .invbody-timeentries tbody .notes {
+      padding-left: 5px;
+      text-align: left;
+    }
+
+    .invbody-timeentries thead .rate {
+      border-top: solid 1px #f1f1f1;
+      text-align: right;
+    }
+
+    .invbody-timeentries tbody .rate {
+      text-align: right;
+    }
+
+    .invbody-timeentries thead .hours {
+      border-top: solid 1px #f1f1f1;
+      text-align: right;
+    }
+
+    .invbody-timeentries tbody .hours {
+      text-align: right;
+    }
+
+    .invbody-timeentries thead .linetotal {
+      border-top: solid 0px #f1f1f1;
+      text-align: right;
+      padding-right: 5px;
+    }
+
+    .invbody-timeentries tbody .linetotal {
+      text-align: right;
+      padding-right: 5px;
+    }
+
+    /*
+     * 		SUMMARY TABLE
+     */
+
+    .invbody-summary {
+      page-break-inside: avoid;
+      min-height: 126px;
+      clear: both;
+      width: 100%;
+      border-top: solid 3px #e3e3e3;
+      margin-bottom: 18px;
+    }
+
+    .invbody-summary th {
+      font-weight: normal;
+      text-align: left;
+    }
+
+    .invbody-summary td {
+      text-align: right;
+    }
+
+    .invbody-summary th, .invbody-summary td {
+      padding: 0px 5px;
+    }
+
+    .invbody-summary .border {
+      border-top: solid 1px #e5e5e5;
+      padding-top: 3px;
+    }
+
+    .invbody-summary-paid td, .invbody-summary-paid th {
+      padding-bottom: 3px;
+    }
+
+    .invbody-summary-subtotal td, .invbody-summary-subtotal th {
+      padding-top: 3px;
+    }
+
+    .invbody-summary-discount td, .invbody-summary-discount th {
+      padding-top: 3px;
+    }
+
+    .invbody-summary-total td, .invbody-summary-total th {
+      background-color: #198da2;
+      border-top: solid 0px #c7c7c7;
+      border-bottom: solid 0px #c7c7c7;
+      padding: 0px;
+    }
+
+    .invbody-summary-total th {
+      border-left: solid 0px #c7c7c7;
+    }
+
+    .invbody-summary-total td {
+      border-right: solid 0px #c7c7c7;
+    }
+
+    .invbody-summary .invbody-summary-total th div {
+      border-left: solid 0px #f1f1f1;
+      border-top: solid 0px #f1f1f1;
+      padding: 3px 5px;
+    }
+
+    .invbody-summary .invbody-summary-total td div {
+      border-top: solid 0px #f1f1f1;
+      padding: 3px 5px;
+    }
+	</style>
+</head>
+<body>
+<div class="print-container">
+<div class="invheader">
+<div class="invheader-upper">
+<div class="invheader-address-account"><img alt="" src="{{logo_data_uri}}" style="height:60px; width:200px" /><br />
+<br />
+<span style="font-size:12px">{{invoice_contact_block}}
+</span><br />
+{{invoice_abn_label}}: {{account_vat_reg_no}}</div>
+
+<div class="invheader-invoicedetails">
+<table cellspacing="0">
+	<tbody>
+		<tr>
+			<td>{{invoice_paid_stamp}}</td>
+			<td><span style="font-size:22px"><strong><span style="color:#198da2">TAX INVOICE</span></strong></span></td>
+		</tr>
+	</tbody>
+</table>
+&nbsp;
+
+<table cellspacing="0">
+	<tbody>
+		<tr>
+			<th class="invheader-invoicedetails-balance" style="height: 25px; text-align: center; vertical-align: middle; background-color: rgb(25, 141, 162);">
+			<div style="text-align: center;"><span style="color:#FFFFFF">DATE</span></div>
+			</th>
+			<td style="border-top: solid 1px #e5e5e5;">
+			<div>{{invoice_date}}</div>
+			</td>
+		</tr>
+		<tr>
+			<th class="invheader-invoicedetails-balance" style="white-space: nowrap; height: 25px; background-color: rgb(25, 141, 162);">
+			<div style="text-align: center;"><span style="color:#FFFFFF">INVOICE #</span></div>
+			</th>
+			<td style="border-top: solid 1px #e5e5e5; border-bottom: solid 1px #e5e5e5;">
+			<div>{{invoice_number}}</div>
+			</td>
+		</tr>
+		<tr>
+			<th class="invheader-invoicedetails-balance" style="white-space: nowrap; height: 25px; background-color: rgb(25, 141, 162); text-align: center;"><span style="color:#FFFFFF">INVOICE NAME</span></th>
+			<td style="border-top: solid 1px #e5e5e5; border-bottom: solid 1px #e5e5e5;">{{invoice_name}}</td>
+		</tr>
+	</tbody>
+</table>
+</div>
+</div>
+
+<div class="invheader-lower">
+<div class="invheader-address-client">
+<table cellspacing="0">
+	<tbody>
+		<tr class="invheader-invoicedetails-balance">
+			<th style="height: 25px; text-align: left; vertical-align: middle;">
+			<div class="invbody-summary-total"><span style="color:#FFFFFF"><strong>&nbsp; BILL TO</strong></span></div>
+			</th>
+		</tr>
+		<tr>
+			<td style="border-bottom: solid 1px #e5e5e5">
+			<p>&nbsp; &nbsp;{{customer_business_name_and_full_name}}<br />
+			&nbsp; &nbsp;<br />
+			&nbsp; &nbsp;{{customer_address}} {{customer_address_2}}<br />
+			&nbsp; &nbsp;{{customer_city}},&nbsp;{{customer_state}}&nbsp;{{customer_zip}}</p>
+			</td>
+		</tr>
+	</tbody>
+</table>
+</div>
+
+<div class="invheader-invoicedetails">
+<table cellspacing="0">
+	<tbody>
+		<tr>
+			<th style="text-align: center; background-color: #198da2; vertical-align: middle; height: 25px;">
+			<div><span style="color:#FFFFFF">BALANCE DUE</span></div>
+			</th>
+			<td style="border-top: solid 1px #e5e5e5">
+			<div>{{invoice_balance_due}}</div>
+			</td>
+		</tr>
+		<tr>
+			<th style="background-color: #198da2; text-align: center; vertical-align: middle; height: 25px;">
+			<div><span style="color:#FFFFFF">DUE DATE</span></div>
+			</th>
+			<td style="border-top: solid 1px #e5e5e5">
+			<div>{{invoice_due_date}}</div>
+			</td>
+		</tr>
+		<tr>
+			<th style="background-color: #198da2; text-align: center; vertical-align: middle; height: 25px;">
+			<div><span style="color:#FFFFFF">PO NUMBER</span></div>
+			</th>
+			<td style="border-top: solid 1px #e5e5e5; border-bottom: solid 1px #e5e5e5">
+			<div>{{invoice_po_number}}</div>
+			</td>
+		</tr>
+	</tbody>
+</table>
+
+<p>&nbsp;</p>
+
+<p>&nbsp;</p>
+</div>
+</div>
+
+<div class="invbody">
+<table cellspacing="0" class="invbody-items">
+	<thead>
+		<tr>
+			<th>
+			<div class="item"><span style="color:#FFFFFF">Item</span></div>
+			</th>
+			<th>
+			<div class="description"><span style="color:#FFFFFF">Description</span></div>
+			</th>
+			<th>
+			<div class="quantity"><span style="color:#FFFFFF">Quantity</span></div>
+			</th>
+			<th>
+			<div class="unitcost"><span style="color:#FFFFFF">Unit Cost</span></div>
+			</th>
+			<th>
+			<div class="unitcost"><span style="color:#FFFFFF">Net Amount</span></div>
+			</th>
+		</tr>
+	</thead>
+	<tbody>{{invoice_line_items_table_no_tax}}
+	</tbody>
+</table>
+
+<div class="invbody-summary">
+<div class="invheader-invoicedetails">
+<table cellspacing="0">
+	<tbody>
+		<tr>
+			<td style="border-top: solid 1px #e5e5e5; width: 150px;">Total Net Amount</td>
+			<td style="border-top: solid 1px #e5e5e5; width: 120px;">{{invoice_subtotal}}</td>
+		</tr>
+		<tr class="invbody-summary-paid">
+			<td style="border-top: solid 1px #e5e5e5; width: 150px;">Total {{tax_label}} Amount</td>
+			<td style="border-top: solid 1px #e5e5e5; width: 120px;">{{invoice_tax}}</td>
+		</tr>
+		<tr class="invbody-summary-paid">
+			<td style="border-top: solid 1px #e5e5e5; width: 150px;"><strong>Invoice Total</strong></td>
+			<td style="border-top: solid 1px #e5e5e5; width: 120px;"><strong>{{invoice_total}}</strong></td>
+		</tr>
+		<tr class="invbody-summary-paid">
+			<td style="border-top: solid 1px #e5e5e5; width: 150px;">Payments</td>
+			<td style="border-top: solid 1px #e5e5e5; width: 120px;">{{invoice_payments_amount}}</td>
+		</tr>
+		<tr class="invbody-summary-paid">
+			<td style="border-top: solid 1px #e5e5e5; width: 150px;">Credits</td>
+			<td style="border-top: solid 1px #e5e5e5; width: 120px;">{{invoice_misc_credits}}</td>
+		</tr>
+		<tr class="invbody-summary-paid">
+			<td style="border-top: solid 1px #e5e5e5; width: 150px;">Unapplied Credits</td>
+			<td style="border-top: solid 1px #e5e5e5; width: 120px;">{{customer_unapplied_credits}}</td>
+		</tr>
+		<tr class="invbody-summary-paid">
+			<td style="border-top: solid 1px #e5e5e5; width: 150px;">Pre-Paid Hours</td>
+			<td style="border-top: solid 1px #e5e5e5; width: 120px;">{{customer_prepay_hours}}</td>
+		</tr>
+		<tr class="invbody-summary-total">
+			<td style="width: 150px; height: 25px;">
+			<div><span style="color:#FFFFFF"><strong>Balance Due</strong></span></div>
+			</td>
+			<td style="width: 120px;">
+			<div><span style="color:#FFFFFF"><strong>{{invoice_balance_due}}</strong></span></div>
+			</td>
+		</tr>
+	</tbody>
+</table>
+</div>
+
+<h2><span style="color:#FF0000"><span style="font-size:12px">{{invoice_message}}</span></span></h2>
+
+<h2>Disclaimer</h2>
+
+<p><span style="font-size:12px; line-height:16px">{{invoice_disclaimer}} </span></p>
+</div>
+
+<div class="clearb" style="height: 1px; overflow: hidden;">&nbsp;</div>
+</div>
+</div>
+</div>
+</body>
+</html>

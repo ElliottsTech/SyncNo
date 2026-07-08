@@ -73,6 +73,21 @@ router.get('/', (req, res) => {
   });
 });
 
+// GET /api/estimates/:id/pdf - generate a PDF for this estimate
+router.get('/:id/pdf', async (req, res) => {
+  try {
+    const { generatePdf } = await import('../services/pdf.js');
+    const result = await generatePdf('estimate', req.params.id);
+    if (!result) return res.status(404).json({ error: 'Not found' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Estimate ${result.number}.pdf"`);
+    res.send(result.buffer);
+  } catch (e) {
+    console.error('[estimates/pdf] generation failed:', e);
+    res.status(500).json({ error: 'PDF generation failed', detail: e.message });
+  }
+});
+
 // GET /api/estimates/:id - estimate detail
 router.get('/:id', (req, res) => {
   const db = getDb();

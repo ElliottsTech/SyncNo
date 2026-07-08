@@ -28,6 +28,7 @@ import syncRouter from './routes/sync.js';
 import systemRouter from './routes/system.js';
 import backupSettingsRouter from './routes/backup_settings.js';
 import mcpSettingsRouter from './routes/mcp_settings.js';
+import pdfSettingsRouter from './routes/pdf_settings.js';
 import { startAnalytics } from './analytics.js';
 import { isDemo, DEMO_USER } from './demo.js';
 import { readFileSync, existsSync } from 'fs';
@@ -139,6 +140,7 @@ app.use('/api/sync', syncRouter);
 app.use('/api/system', systemRouter);
 app.use('/api/backup-settings', backupSettingsRouter);
 app.use('/api/mcp-settings', mcpSettingsRouter);
+app.use('/api/pdf-settings', pdfSettingsRouter);
 
 // Serve locally-cached ticket attachment files.
 // Auth middleware above already gates all /api/* — session required.

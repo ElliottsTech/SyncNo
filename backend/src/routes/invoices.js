@@ -116,6 +116,21 @@ router.get('/', (req, res) => {
   });
 });
 
+// GET /api/invoices/:id/pdf - generate a PDF for this invoice
+router.get('/:id/pdf', async (req, res) => {
+  try {
+    const { generatePdf } = await import('../services/pdf.js');
+    const result = await generatePdf('invoice', req.params.id);
+    if (!result) return res.status(404).json({ error: 'Not found' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Invoice ${result.number}.pdf"`);
+    res.send(result.buffer);
+  } catch (e) {
+    console.error('[invoices/pdf] generation failed:', e);
+    res.status(500).json({ error: 'PDF generation failed', detail: e.message });
+  }
+});
+
 // GET /api/invoices/:id - invoice detail
 router.get('/:id', (req, res) => {
   const db = getDb();

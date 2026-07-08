@@ -67,6 +67,21 @@ router.get('/', (req, res) => {
   });
 });
 
+// GET /api/purchase-orders/:id/pdf - generate a PDF for this purchase order
+router.get('/:id/pdf', async (req, res) => {
+  try {
+    const { generatePdf } = await import('../services/pdf.js');
+    const result = await generatePdf('purchase_order', req.params.id);
+    if (!result) return res.status(404).json({ error: 'Not found' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Purchase Order ${result.number}.pdf"`);
+    res.send(result.buffer);
+  } catch (e) {
+    console.error('[purchase-orders/pdf] generation failed:', e);
+    res.status(500).json({ error: 'PDF generation failed', detail: e.message });
+  }
+});
+
 // GET /api/purchase-orders/:id - PO detail
 router.get('/:id', (req, res) => {
   const db = getDb();

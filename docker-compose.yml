@@ -12,6 +12,16 @@ services:
       - /root/SyncNo/SyncNo:/root/SyncNo/SyncNo:ro
       - ./.env:/app/.env
       - ./VERSION:/app/VERSION:ro
+    # Larger shared memory for headless Chromium (PDF generation). The default
+    # 64M is too small and Chromium crashes (SIGBUS) when it runs out.
+    shm_size: 1gb
+    # Chromium uses syscalls (clone3, etc.) blocked by the default Docker
+    # seccomp profile on older runtimes, and the docker-default AppArmor
+    # profile also traps it (SIGTRAP, exit 133). Relax both so headless
+    # Chromium can launch for PDF rendering.
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
     environment:
       REPO_DIR: /app
       HOST_INSTALL_DIR: ${HOST_INSTALL_DIR:-/opt/syncno}

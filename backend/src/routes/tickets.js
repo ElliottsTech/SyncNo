@@ -97,6 +97,21 @@ router.get('/', (req, res) => {
   });
 });
 
+// GET /api/tickets/:id/pdf - generate a PDF for this ticket
+router.get('/:id/pdf', async (req, res) => {
+  try {
+    const { generatePdf } = await import('../services/pdf.js');
+    const result = await generatePdf('ticket', req.params.id);
+    if (!result) return res.status(404).json({ error: 'Not found' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Ticket ${result.number}.pdf"`);
+    res.send(result.buffer);
+  } catch (e) {
+    console.error('[tickets/pdf] generation failed:', e);
+    res.status(500).json({ error: 'PDF generation failed', detail: e.message });
+  }
+});
+
 // GET /api/tickets/:id - ticket detail
 router.get('/:id', (req, res) => {
   const db = getDb();

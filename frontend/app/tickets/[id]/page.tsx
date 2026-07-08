@@ -212,9 +212,21 @@ export default function TicketDetail() {
               <Badge variant={statusVariant(ticket.status)}>{ticket.status || '—'}</Badge>
               {ticket.priority && <Badge variant={priorityVariant(ticket.priority)}>{ticket.priority}</Badge>}
               {overdue && <Badge variant="danger">⚠ Overdue</Badge>}
+              <a
+                href={`${API}/tickets/${ticket.id}/pdf`}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-sm px-3 py-2 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100 whitespace-nowrap"
+                title="Generate and download a ticket PDF"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden className="shrink-0">
+                  <path d="M8 1.5v9M8 10.5L5 7.5M8 10.5L11 7.5M2.5 13h11" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                Download PDF
+              </a>
               {pdfUrl && (
                 <a href={pdfUrl} target="_blank" rel="noreferrer" className="text-xs text-blue-600 hover:underline">
-                  ↓ PDF
+                  ↓ Original PDF
                 </a>
               )}
             </div>

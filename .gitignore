@@ -13,7 +13,9 @@ node_modules
 SyncNo/*
 SyncNo/
 backend/data/json_export/
+backend/data/invoice-assets/
 .restic-password
 .claude/
 docker-compose.override.yml
 docker-compose.override.yaml
+samples/
