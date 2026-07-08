@@ -130,7 +130,7 @@ SyncNo ships an **MCP server** (`mcp-server/`) that exposes business data to LLM
 
 **Transport:** Streamable HTTP at `POST /mcp` (single stateless endpoint; no SSE notification stream).
 
-**Routing:** the `mcp-server` container is **not published** — it lives on the internal Docker network only. The frontend proxies `/mcp` to it (`frontend/app/mcp/route.ts`, env `MCP_SERVER_URL=http://mcp-server:3003`), so LLM clients reach the MCP server at the same public host/port as the rest of the app (e.g. `https://syncno.elliotts.tech/mcp`). The proxy forwards headers (including the `Authorization` bearer) and streams the response body through unchanged so the MCP SSE responses pass intact. `/mcp` is exempt from the NextAuth session redirect (it authenticates via `MCP_API_TOKEN`, not a browser session).
+**Routing:** the `mcp-server` container is **not published** — it lives on the internal Docker network only. The frontend proxies `/mcp` to it (`frontend/app/mcp/route.ts`, env `MCP_SERVER_URL=http://mcp-server:3003`), so LLM clients reach the MCP server at the same public host/port as the rest of the app (e.g. `https://[slug].syncno.net/mcp`). The proxy forwards headers (including the `Authorization` bearer) and streams the response body through unchanged so the MCP SSE responses pass intact. `/mcp` is exempt from the NextAuth session redirect (it authenticates via `MCP_API_TOKEN`, not a browser session).
 
 **Env vars** (`mcp-server/`): `BACKEND_URL` (default `http://localhost:3002`), `SYNCNO_API_KEY` (required, reused from the backend), `MCP_API_TOKEN` (required — `openssl rand -base64 32`), `MCP_PORT` (default `3003`). The frontend reads `MCP_SERVER_URL` to reach the mcp-server container.
 
