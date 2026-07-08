@@ -136,9 +136,6 @@ SyncNo ships an **MCP server** (`mcp-server/`) that exposes business data to LLM
 
 **Run locally** (from the repo root, against an already-running backend):
 
-MCP Screenshot:
-<img width="771" height="708" alt="image" src="https://github.com/user-attachments/assets/7bf1abb2-f0a3-4005-825e-8b60bda360f5" />
-
 ```bash
 MCP_API_TOKEN=$(openssl rand -base64 32) \
 SYNCNO_API_KEY=<your-key> \
@@ -169,6 +166,9 @@ npm run dev --workspace=mcp-server
 - **Status reads** — `get_sync_status`, `get_sync_last_results`, `get_system_version` (no secrets).
 
 **Context hygiene:** page size is capped at 50 (default 25) regardless of what the caller passes, and `raw_json` is stripped unless explicitly requested.
+
+MCP Screenshot:
+<img width="771" height="708" alt="image" src="https://github.com/user-attachments/assets/7bf1abb2-f0a3-4005-825e-8b60bda360f5" />
 
 ---
 
