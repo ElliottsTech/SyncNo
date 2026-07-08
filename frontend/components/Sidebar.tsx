@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useSession, signOut } from 'next-auth/react';
 import { useMemo, useEffect, useState } from 'react';
+import { IS_DEMO } from '../app/lib/demo';
 
 const ADMIN_ONLY = ['/users', '/logs', '/syncro', '/settings'];
 
@@ -78,7 +79,9 @@ export default function Sidebar() {
   const pathname = usePathname();
   const { data: session, status } = useSession();
   const role = session?.user?.role;
-  const isAdmin = role === 'admin';
+  // In demo mode there's no session (auth is bypassed) — treat as admin so
+  // settings/sync/users/logs links are visible.
+  const isAdmin = IS_DEMO || role === 'admin';
 
   const [enabled, setEnabled] = useState<Set<string> | null>(null);
   const [version, setVersion] = useState<{
@@ -177,6 +180,8 @@ export default function Sidebar() {
         )}
         {status === 'loading' ? (
           <p className="text-xs text-gray-500 px-3 py-2">Loading...</p>
+        ) : IS_DEMO ? (
+          <p className="text-xs text-gray-400 px-3 py-2 truncate">demo@syncno.local</p>
         ) : session ? (
           <>
             <p className="text-xs text-gray-400 px-3 mb-2 truncate">{session.user?.email}</p>

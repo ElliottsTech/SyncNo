@@ -54,18 +54,11 @@ export const authOptions: NextAuthOptions = {
         };
       },
     },
-    // Demo-only provider — accepts any sign-in attempt and returns the demo admin
-    // user. Only active when NEXT_PUBLIC_DEMO=yes. The jwt/session callbacks
-    // short-circuit in demo mode so no real auth round-trip happens.
-    ...(IS_DEMO ? [{
-      id: 'demo',
-      name: 'Demo',
-      type: 'credentials' as const,
-      credentials: {},
-      async authorize() {
-        return { id: DEMO_USER.id, name: DEMO_USER.name, email: DEMO_USER.email };
-      },
-    }] : []),
+    // NOTE: The demo credentials provider was removed — it caused a NextAuth
+    // Configuration error because credentials providers require NEXTAUTH_SECRET
+    // to initialize. Demo mode doesn't need a session: the middleware (DEMO_MODE=1)
+    // bypasses page auth, the backend (DEMO=yes) bypasses API auth, and the
+    // Sidebar/DemoBanner use IS_DEMO for UI (banner + admin links).
   ],
   pages: {
     signIn: '/login',
