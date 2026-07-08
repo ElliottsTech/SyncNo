@@ -151,7 +151,7 @@ npm run dev --workspace=mcp-server
 {
   "mcpServers": {
     "syncno": {
-      "url": "https://syncno.elliotts.tech/mcp",
+      "url": "https://[slug].syncno.net/mcp",
       "headers": { "Authorization": "Bearer <MCP_API_TOKEN>" }
     }
   }
