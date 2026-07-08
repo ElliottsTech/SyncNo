@@ -37,10 +37,34 @@ services:
       NEXTAUTH_URL: ${NEXTAUTH_URL}
       NEXT_PUBLIC_API_URL: /api
       BACKEND_URL: http://backend:3002
+      MCP_SERVER_URL: http://mcp-server:3003
       SYNCNO_API_KEY: ${SYNCNO_API_KEY}
       AZURE_CLIENT_ID: ${AZURE_CLIENT_ID}
       AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET}
       AZURE_TENANT_ID: ${AZURE_TENANT_ID}
+    depends_on:
+      - backend
+    networks:
+      - syncno
+    restart: unless-stopped
+
+  # MCP server: exposes SyncNo data to LLM clients over the Streamable HTTP
+  # transport. Thin HTTP client to the backend (reuses SYNCNO_API_KEY). LLM
+  # clients authenticate with MCP_API_TOKEN. Not published — the frontend
+  # proxies /mcp to this container over the internal network, so LLM clients
+  # reach it via the same public frontend URL as the rest of the app.
+  # See README "MCP server" section.
+  mcp-server:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    expose:
+      - "3003"
+    environment:
+      BACKEND_URL: http://backend:3002
+      SYNCNO_API_KEY: ${SYNCNO_API_KEY}
+      MCP_API_TOKEN: ${MCP_API_TOKEN}
+      MCP_PORT: "3003"
     depends_on:
       - backend
     networks:
