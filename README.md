@@ -136,6 +136,9 @@ SyncNo ships an **MCP server** (`mcp-server/`) that exposes business data to LLM
 
 **Run locally** (from the repo root, against an already-running backend):
 
+MCP Screenshot:
+<img width="771" height="708" alt="image" src="https://github.com/user-attachments/assets/7bf1abb2-f0a3-4005-825e-8b60bda360f5" />
+
 ```bash
 MCP_API_TOKEN=$(openssl rand -base64 32) \
 SYNCNO_API_KEY=<your-key> \
@@ -570,5 +573,3 @@ All list endpoints support query params:
 |--------|------|------|-------|
 | GET | `/version` | Admin only | `{ current, latest, updateAvailable }`. Pass `?refresh=true` to bypass cache. |
 
-MCP added:
-<img width="771" height="708" alt="image" src="https://github.com/user-attachments/assets/7bf1abb2-f0a3-4005-825e-8b60bda360f5" />
