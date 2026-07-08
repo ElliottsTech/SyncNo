@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { useSession } from 'next-auth/react';
+import { useSession } from 'next-auth/react'
+import { IS_DEMO } from '../../../app/lib/demo';
 import { useRouter } from 'next/navigation';
 import CollapsibleSection from '../../../components/CollapsibleSection';
 import TabEnablementSection from '../../../components/TabEnablementSection';
@@ -45,11 +46,11 @@ export default function ConfigPage() {
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    if (status === 'authenticated' && session?.user?.role !== 'admin') {
+    if (!IS_DEMO && status === 'authenticated' && session?.user?.role !== 'admin') {
       router.replace('/');
       return;
     }
-    if (status !== 'authenticated') return;
+    if (!IS_DEMO && status !== 'authenticated') return;
     refresh();
     refreshCreds();
   }, [status, session, router]);
@@ -135,7 +136,7 @@ export default function ConfigPage() {
     }
   };
 
-  if (status !== 'authenticated') {
+  if (!IS_DEMO && status !== 'authenticated') {
     return <div className="p-8 text-gray-500">Loading...</div>;
   }
 

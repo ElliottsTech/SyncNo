@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect, Fragment } from 'react';
-import { useSession } from 'next-auth/react';
+import { useSession } from 'next-auth/react'
+import { IS_DEMO } from '../../app/lib/demo';
 import { useRouter } from 'next/navigation';
 import Pagination from '../../components/Pagination';
 import { usePageTitle } from '../../lib/usePageTitle';
@@ -55,7 +56,7 @@ export default function LogsPage() {
   const router = useRouter();
 
   useEffect(() => {
-    if (status === 'authenticated' && session?.user?.role !== 'admin') {
+    if (!IS_DEMO && status === 'authenticated' && session?.user?.role !== 'admin') {
       router.replace('/');
     }
   }, [status, session, router]);

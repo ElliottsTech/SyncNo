@@ -1,7 +1,8 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useSession } from 'next-auth/react';
+import { useSession } from 'next-auth/react'
+import { IS_DEMO } from '../../app/lib/demo';
 
 const API = '/api';
 
@@ -23,11 +24,11 @@ export default function UsersPage() {
   const currentUserId = session?.user?.id;
 
   useEffect(() => {
-    if (status === 'authenticated' && session?.user?.role !== 'admin') {
+    if (!IS_DEMO && status === 'authenticated' && session?.user?.role !== 'admin') {
       router.replace('/');
       return;
     }
-    if (status !== 'authenticated') return;
+    if (!IS_DEMO && status !== 'authenticated') return;
     refresh();
   }, [status, session, router]);
 

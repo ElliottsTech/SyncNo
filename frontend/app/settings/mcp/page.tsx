@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
-import { useSession } from 'next-auth/react';
+import { useSession } from 'next-auth/react'
+import { IS_DEMO } from '../../../app/lib/demo';
 import { useRouter } from 'next/navigation';
 import CollapsibleSection from '../../../components/CollapsibleSection';
 import { usePageTitle } from '../../../lib/usePageTitle';
@@ -35,11 +36,11 @@ export default function McpPage() {
   const [copied, setCopied] = useState<string | null>(null);
 
   useEffect(() => {
-    if (status === 'authenticated' && session?.user?.role !== 'admin') {
+    if (!IS_DEMO && status === 'authenticated' && session?.user?.role !== 'admin') {
       router.replace('/');
       return;
     }
-    if (status !== 'authenticated') return;
+    if (!IS_DEMO && status !== 'authenticated') return;
     refresh();
   }, [status, session, router]);
 
@@ -147,7 +148,7 @@ Available tool categories (call "tools/list" on the endpoint to see all of them)
 All tools are READ-ONLY. They cannot modify data, trigger syncs, or read secrets.
 Page size is capped at 50 rows (default 25).`;
 
-  if (status !== 'authenticated') {
+  if (!IS_DEMO && status !== 'authenticated') {
     return <div className="p-8 text-gray-500">Loading…</div>;
   }
 

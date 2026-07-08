@@ -54,11 +54,8 @@ export const authOptions: NextAuthOptions = {
         };
       },
     },
-    // NOTE: The demo credentials provider was removed — it caused a NextAuth
-    // Configuration error because credentials providers require NEXTAUTH_SECRET
-    // to initialize. Demo mode doesn't need a session: the middleware (DEMO_MODE=1)
-    // bypasses page auth, the backend (DEMO=yes) bypasses API auth, and the
-    // Sidebar/DemoBanner use IS_DEMO for UI (banner + admin links).
+    // Demo credentials provider removed — NextAuth v4 App Router doesn't support
+    // the credentials POST. Pages that gate on useSession bypass via IS_DEMO.
   ],
   pages: {
     signIn: '/login',
