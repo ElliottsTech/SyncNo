@@ -13,9 +13,11 @@ const SECRET = process.env.NEXTAUTH_SECRET || process.env.AUTH_SECRET;
 //   - /login          : the sign-in page itself
 //   - /api/*          : the backend proxy returns its own 401 (and /api/auth/*
 //                       is NextAuth's own handler)
+//   - /mcp            : the MCP server proxy — authenticates via MCP_API_TOKEN
+//                       bearer header, not a browser session (LLM clients)
 //   - /_next/*        : Next.js framework assets (chunks, static, image)
 //   - common static   : favicon + brand image
-const PUBLIC_PATHS = ['/login', '/api'];
+const PUBLIC_PATHS = ['/login', '/api', '/mcp'];
 const PUBLIC_EXACT = new Set(['/', '/favicon.ico', '/SyncNo.png']);
 
 function isPublic(pathname: string): boolean {

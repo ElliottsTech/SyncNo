@@ -3,6 +3,7 @@ import { getDb } from '../db/database.js';
 import { isDemo, demoNoop } from '../demo.js';
 import fs from 'fs';
 import path from 'path';
+import { getSetting, setSetting, mask, updateEnvFile } from '../lib/settings.js';
 
 const router = Router();
 
@@ -159,52 +160,6 @@ function abortSync(id) {
     return true;
   }
   return false;
-}
-
-// ─── Settings helpers ─────────────────────────────────────────────────────────
-
-function getSetting(key) {
-  const envKey = key.toUpperCase();
-  const envVal = process.env[envKey];
-  if (envVal) return envVal;
-  const db = getDb();
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-  return row ? row.value : null;
-}
-
-function setSetting(key, value) {
-  const db = getDb();
-  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
-}
-
-function mask(value) {
-  if (!value) return null;
-  const len = value.length;
-  if (len <= 8) return '•'.repeat(len);
-  return value.slice(0, 4) + '•'.repeat(Math.min(len - 8, 20)) + value.slice(-4);
-}
-
-function updateEnvFile(envPath, updates) {
-  let content = '';
-  if (fs.existsSync(envPath)) {
-    content = fs.readFileSync(envPath, 'utf8');
-  }
-  const lines = content.split('\n');
-  const seen = new Set();
-  const updated = lines.map(line => {
-    for (const [key, val] of Object.entries(updates)) {
-      const prefix = `${key}=`;
-      if (line.startsWith(prefix)) {
-        seen.add(key);
-        return val == null ? line : `${prefix}${val}`;
-      }
-    }
-    return line;
-  });
-  for (const [key, val] of Object.entries(updates)) {
-    if (!seen.has(key) && val != null) updated.push(`${key}=${val}`);
-  }
-  fs.writeFileSync(envPath, updated.join('\n').replace(/\n+$/, '\n') + '\n');
 }
 
 // ─── Sync state helpers ───────────────────────────────────────────────────────

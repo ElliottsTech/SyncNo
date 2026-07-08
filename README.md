@@ -119,9 +119,53 @@ Authorization rules:
 - Internal auth-helper routes (`POST /users/upsert`, `GET /users/:id/role`, `PUT /users/:id/last-login`): service key only — browser cannot call them.
 - `/api/health` and `/api/auth/*`: public.
 
-### Integrating an MCP server
+### MCP server
 
-Run the MCP server on the same host (or Docker network). Read `SYNCNO_API_KEY` and `BACKEND_URL` from the environment, send `Authorization: Bearer <key>` on every request. No special endpoints — the same routes the frontend uses are available to the MCP server. Service-key requests are tagged `req.user.role === 'service'`; they pass `requireAuth` but not `requireAdmin`, so admin-only mutations stay blocked.
+SyncNo ships an **MCP server** (`mcp-server/`) that exposes business data to LLM clients (Claude Desktop, etc.) over the [Model Context Protocol](https://modelcontextprotocol.io). It's a thin HTTP client over the backend REST API — it carries no database connection and reuses the existing enrichment and authorization of `/api/*`.
+
+**Two-layer auth:**
+
+1. **Client → MCP server:** `Authorization: Bearer ${MCP_API_TOKEN}` (a separate secret; LLM clients never see `SYNCNO_API_KEY`).
+2. **MCP server → backend:** `Authorization: Bearer ${SYNCNO_API_KEY}`, which authenticates as `role: 'service'` — passing `requireAuth` but blocked from admin mutations. The MCP server only ever issues GETs and only wraps read endpoints, so secrets/ops tables (`settings`, `users`, `logs`), `/api/sync/credentials`, and all `/api/backup-settings/*` are unreachable by construction.
+
+**Transport:** Streamable HTTP at `POST /mcp` (single stateless endpoint; no SSE notification stream).
+
+**Routing:** the `mcp-server` container is **not published** — it lives on the internal Docker network only. The frontend proxies `/mcp` to it (`frontend/app/mcp/route.ts`, env `MCP_SERVER_URL=http://mcp-server:3003`), so LLM clients reach the MCP server at the same public host/port as the rest of the app (e.g. `https://syncno.elliotts.tech/mcp`). The proxy forwards headers (including the `Authorization` bearer) and streams the response body through unchanged so the MCP SSE responses pass intact. `/mcp` is exempt from the NextAuth session redirect (it authenticates via `MCP_API_TOKEN`, not a browser session).
+
+**Env vars** (`mcp-server/`): `BACKEND_URL` (default `http://localhost:3002`), `SYNCNO_API_KEY` (required, reused from the backend), `MCP_API_TOKEN` (required — `openssl rand -base64 32`), `MCP_PORT` (default `3003`). The frontend reads `MCP_SERVER_URL` to reach the mcp-server container.
+
+**Run locally** (from the repo root, against an already-running backend):
+
+```bash
+MCP_API_TOKEN=$(openssl rand -base64 32) \
+SYNCNO_API_KEY=<your-key> \
+BACKEND_URL=http://localhost:3002 \
+npm run dev --workspace=mcp-server
+```
+
+**Run in Docker:** the `mcp-server` service is included in `docker-compose.yml` (internal-only `expose: 3003`, joins the `syncno` network, targets `http://backend:3002`). The frontend container gets `MCP_SERVER_URL=http://mcp-server:3003` and proxies `/mcp` to it. Set `MCP_API_TOKEN` in `.env` and `docker compose up -d --build frontend mcp-server`.
+
+**Connect from Claude Desktop** (remote MCP client config — note the `/mcp` path on the public frontend URL, no port suffix):
+
+```jsonc
+{
+  "mcpServers": {
+    "syncno": {
+      "url": "https://syncno.elliotts.tech/mcp",
+      "headers": { "Authorization": "Bearer <MCP_API_TOKEN>" }
+    }
+  }
+}
+```
+
+**Tools exposed (60):**
+
+- **`search`** — cross-entity search across 14 types (customers, tickets, ticket comments, invoices, products, vendors, serials, appointments, contracts, leads, portal users, syncro users, wiki pages, schedules). The primary discovery tool — start here, then drill in.
+- **Per-entity `list_*` / `get_*`** (18 entities: customer, ticket, invoice, estimate, purchase_order, asset, product, payment, appointment, appointment_type, contract, lead, policy_folder, portal_user, schedule, syncro_user, wiki_page, vendor). `list_*` honor the backend's pagination, column filters, and sort allowlist (see each tool's schema). `get_*` strip the large `raw_json` field by default; pass `includeRawJson: true` to retrieve the original Syncro payload.
+- **Relationship fetchers** — `get_customer_{contacts,tickets,assets,invoices,estimates,payments,schedules,policies}`, `get_ticket_{comments,time_entries,line_items,invoices,estimates,appointments,worksheets}`, `get_invoice_{payments,ticket}`, `get_vendor_purchase_orders`, `get_product_tickets`, and `lookup_serial` (by serial string).
+- **Status reads** — `get_sync_status`, `get_sync_last_results`, `get_system_version` (no secrets).
+
+**Context hygiene:** page size is capped at 50 (default 25) regardless of what the caller passes, and `raw_json` is stripped unless explicitly requested.
 
 ---
 
