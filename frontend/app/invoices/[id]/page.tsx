@@ -170,13 +170,23 @@ export default function InvoiceDetail() {
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      {li.serial_number ? (
-                        <Link href={`/serials/${encodeURIComponent(li.serial_number)}`} className="text-blue-600 hover:underline font-mono text-xs">
-                          {li.serial_number}
-                        </Link>
-                      ) : (
-                        <span className="text-gray-400">—</span>
-                      )}
+                      {(() => {
+                        const serials: string[] = li.serial_numbers?.length
+                          ? li.serial_numbers
+                          : li.serial_number
+                            ? [li.serial_number]
+                            : [];
+                        if (serials.length === 0) return <span className="text-gray-400">—</span>;
+                        return (
+                          <div className="flex flex-col gap-0.5">
+                            {serials.map((sn: string, j: number) => (
+                              <Link key={j} href={`/serials/${encodeURIComponent(sn)}`} className="text-blue-600 hover:underline font-mono text-xs">
+                                {sn}
+                              </Link>
+                            ))}
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td className="px-4 py-3">{li.description || '—'}</td>
                     <td className="px-4 py-3">{li.quantity || 1}</td>

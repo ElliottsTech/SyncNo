@@ -6,8 +6,9 @@ const router = Router();
 // Enrich line_items parsed from raw_json with product names + matched serial numbers.
 // Mutates each line item in-place:
 //   - `product_name` resolved from products table by product_id
-//   - `serial_number` resolved from product_serials by line_item.id (Syncro sets
-//     product_serial.line_item_id when a serial is sold on this line item)
+//   - `serial_numbers` (array) resolved from product_serials by line_item.id — a line
+//     item with quantity > 1 can have several serials sold on it
+//   - `serial_number` kept as the first serial for consumers expecting a single value
 function enrichLineItems(lineItems) {
   if (!Array.isArray(lineItems) || lineItems.length === 0) return lineItems;
   const db = getDb();
@@ -32,10 +33,15 @@ function enrichLineItems(lineItems) {
     const serials = db.prepare(
       `SELECT line_item_id, serial_number FROM product_serials WHERE line_item_id IN (${placeholders})`
     ).all(...uniq);
-    const serialMap = new Map(serials.map(r => [r.line_item_id, r.serial_number]));
+    const serialMap = new Map();
+    for (const r of serials) {
+      if (!serialMap.has(r.line_item_id)) serialMap.set(r.line_item_id, []);
+      serialMap.get(r.line_item_id).push(r.serial_number);
+    }
     for (const li of lineItems) {
       if (li.id != null && serialMap.has(li.id)) {
-        li.serial_number = serialMap.get(li.id);
+        li.serial_numbers = serialMap.get(li.id);
+        li.serial_number = li.serial_numbers[0];
       }
     }
   }
