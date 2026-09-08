@@ -19,3 +19,9 @@ backend/data/invoice-assets/
 docker-compose.override.yml
 docker-compose.override.yaml
 samples/
+
+# QuickBooks Online — contains OAuth2 client keys + tokens (QBO/credentials.md).
+# Never commit; secrets live in Config → QuickBooks Online (settings table/.env) instead.
+QBO/
+.zcode/
+tmp/

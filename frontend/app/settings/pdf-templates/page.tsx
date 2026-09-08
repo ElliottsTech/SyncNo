@@ -29,6 +29,10 @@ export default function PdfTemplatesPage() {
 
   const [templates, setTemplates] = useState<Templates | null>(null);
   const [activeTab, setActiveTab] = useState<keyof Templates>('invoice');
+  const [viewMode, setViewMode] = useState<'html' | 'preview'>('html');
+  const [previewHtml, setPreviewHtml] = useState<string>('');
+  const [previewing, setPreviewing] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,6 +112,36 @@ export default function PdfTemplatesPage() {
     setTemplates(prev => prev ? { ...prev, [activeTab]: { ...prev[activeTab], ...patch } } : prev);
   };
 
+  const loadPreview = async () => {
+    if (!templates) return;
+    setPreviewing(true);
+    setPreviewError(null);
+    setPreviewHtml('');
+    try {
+      const r = await fetch(`${API}/pdf-settings/preview/${activeTab}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ html: templates[activeTab].html }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || `HTTP ${r.status}`);
+      }
+      const d = await r.json();
+      setPreviewHtml(d.html);
+    } catch (e: any) {
+      setPreviewError(e.message);
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  // When switching tabs in preview mode, auto-refresh the preview if we have one
+  useEffect(() => {
+    if (viewMode === 'preview' && !previewHtml && templates) loadPreview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, viewMode]);
+
   if (status !== 'authenticated') {
     return <div className="p-8 text-gray-500">Loading…</div>;
   }
@@ -164,6 +198,21 @@ export default function PdfTemplatesPage() {
             <div className="flex items-center justify-between mb-2">
               <h2 className="font-semibold">HTML template</h2>
               <div className="flex items-center gap-3">
+                {/* HTML / Preview toggle */}
+                <div className="inline-flex border rounded overflow-hidden text-xs">
+                  <button
+                    onClick={() => setViewMode('html')}
+                    className={`px-3 py-1.5 ${viewMode === 'html' ? 'bg-black text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
+                  >
+                    HTML
+                  </button>
+                  <button
+                    onClick={() => setViewMode('preview')}
+                    className={`px-3 py-1.5 border-l ${viewMode === 'preview' ? 'bg-black text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
+                  >
+                    Preview
+                  </button>
+                </div>
                 <span className="text-xs text-gray-500">
                   {t.custom ? 'Customized' : 'Using default file'}
                 </span>
@@ -178,20 +227,59 @@ export default function PdfTemplatesPage() {
                 )}
               </div>
             </div>
-            <textarea
-              value={t.html}
-              onChange={e => update({ html: e.target.value })}
-              spellCheck={false}
-              rows={24}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-xs font-mono"
-            />
-            <p className="text-xs text-gray-500 mt-2">
-              Tags: <code className="font-mono">{'{{invoice_number}}'}</code>,{' '}
-              <code className="font-mono">{'{{invoice_date}}'}</code>,{' '}
-              <code className="font-mono">{'{{customer_business_name_and_full_name}}'}</code>,{' '}
-              <code className="font-mono">{'{{logo_url}}'}</code>, and many more —
-              see <code>samples/tags.txt</code> in the repo for a full list per type.
-            </p>
+
+            {viewMode === 'html' ? (
+              <>
+                <textarea
+                  value={t.html}
+                  onChange={e => update({ html: e.target.value })}
+                  spellCheck={false}
+                  rows={24}
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-xs font-mono"
+                />
+                <p className="text-xs text-gray-500 mt-2">
+                  Tags: <code className="font-mono">{'{{invoice_number}}'}</code>,{' '}
+                  <code className="font-mono">{'{{invoice_date}}'}</code>,{' '}
+                  <code className="font-mono">{'{{customer_business_name_and_full_name}}'}</code>,{' '}
+                  <code className="font-mono">{'{{logo_url}}'}</code>, and many more —
+                  see <code>samples/tags.txt</code> in the repo for a full list per type.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-gray-500">
+                    Rendered with a sample {activeTab.replace('_', ' ')} from your database.
+                  </span>
+                  <button
+                    onClick={loadPreview}
+                    disabled={previewing}
+                    className="text-xs text-blue-600 hover:underline disabled:opacity-50"
+                  >
+                    {previewing ? 'Rendering…' : 'Refresh preview'}
+                  </button>
+                </div>
+                {previewError ? (
+                  <div className="border border-red-300 bg-red-50 text-red-800 rounded p-3 text-sm">
+                    {previewError}
+                  </div>
+                ) : !previewHtml && !previewing ? (
+                  <button
+                    onClick={loadPreview}
+                    className="bg-gray-50 border rounded p-6 text-sm text-gray-600 hover:bg-gray-100 w-full"
+                  >
+                    Click to render preview
+                  </button>
+                ) : (
+                  <iframe
+                    srcDoc={previewHtml}
+                    title="Template preview"
+                    className="w-full border rounded bg-white"
+                    style={{ height: '70vh' }}
+                  />
+                )}
+              </>
+            )}
           </div>
 
           {/* ─── Message + disclaimer ────────────────────────────────── */}

@@ -62,7 +62,7 @@ router.get('/', (req, res) => {
 
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const validSorts = ['created_at', 'updated_at', 'due_date', 'resolved_at', 'number', 'status', 'priority', 'subject', 'problem_type'];
+  const validSorts = ['created_at', 'updated_at', 'due_date', 'resolved_at', 'number', 'status', 'priority', 'subject', 'problem_type', 'customer_business_then_name'];
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'created_at';
   const safeDir = sortDir === 'asc' ? 'ASC' : 'DESC';
 
@@ -71,7 +71,7 @@ router.get('/', (req, res) => {
     SELECT id, number, subject, status, priority, created_at, updated_at, due_date, resolved_at,
            problem_type, customer_id, customer_business_then_name, attachments_count, raw_json, synced
     FROM tickets ${whereStr}
-    ORDER BY ${safeSort} ${safeDir}
+    ORDER BY ${safeSort} ${safeDir}, id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

@@ -13,6 +13,7 @@ type Company = {
   abnLabel: string;
   abn: string;
   taxLabel: string;
+  showOnboardingChecklist: boolean;
 };
 
 export default function CompanyPage() {
@@ -231,6 +232,32 @@ export default function CompanyPage() {
           onChange={v => setForm(f => f ? { ...f, taxLabel: v } : f)}
           placeholder="Tax"
         />
+      </CollapsibleSection>
+
+      {/* ─── Onboarding checklist ───────────────────────────────────── */}
+      <CollapsibleSection
+        title="Onboarding"
+        containerClassName="bg-white rounded border p-4 mb-4"
+        bodyClassName="mt-3 space-y-3"
+        headerClassName="w-full flex justify-between items-center text-left -mt-1"
+      >
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={form?.showOnboardingChecklist ?? true}
+            onChange={e => setForm(f => f ? { ...f, showOnboardingChecklist: e.target.checked } : f)}
+            className="mt-1 w-4 h-4 cursor-pointer"
+          />
+          <span className="flex-1">
+            <span className="text-sm text-gray-900 block">Show onboarding checklist</span>
+            <span className="text-xs text-gray-500 block mt-0.5">
+              Displays a "Getting started" checklist on the home page with steps
+              like uploading your logo, pasting your Syncro PDF templates, and
+              connecting an AI to your data via MCP. You can also dismiss it
+              directly from the home page.
+            </span>
+          </span>
+        </label>
       </CollapsibleSection>
 
       <div className="flex justify-end">

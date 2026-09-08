@@ -61,7 +61,7 @@ export default function SerialDetail() {
   }
   if (!data) return <p className="text-gray-500">Loading...</p>;
 
-  const { serial: s, product, ticket, invoice, estimate, asset } = data;
+  const { serial: s, product, ticket, invoice, estimate, asset, po, poReason, poError } = data;
   const fmtMoney = (v: any) => {
     const n = parseFloat(v);
     return isNaN(n) ? v : `$${n.toFixed(2)}`;
@@ -69,6 +69,28 @@ export default function SerialDetail() {
   const fmtDate = (v: string) => v ? new Date(v).toLocaleDateString() : '';
 
   const hasLinks = ticket || invoice || estimate || asset;
+
+  // The PO is found by scraping Syncro's internal serial-history page (web
+  // session), so it may be null for several reasons — show the right message.
+  const poEmptyMessage = (() => {
+    switch (poReason) {
+      case 'not_configured':
+        return 'PO lookup not configured — set up Syncro Web Session in Config to resolve the PO a serial was received on.';
+      case 'no_product':
+        return 'No product linked to this serial, so the PO cannot be looked up.';
+      case 'expired':
+        return 'Syncro web session expired — re-export a fresh cookie from your browser and update it in Config → Syncro Web Session.';
+      case 'no_po':
+        return 'No purchase order linked to this serial.';
+      case 'error':
+        return poError ? `PO lookup failed: ${poError}` : 'PO lookup failed.';
+      default:
+        return 'No purchase order linked to this serial.';
+    }
+  })();
+
+  // The matched PO line item (the line that carries this serial's product).
+  const poLineItem = po?.line_items?.find?.((li: any) => String(li.product_id) === String(product?.id)) || null;
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -104,6 +126,38 @@ export default function SerialDetail() {
             </>
           ) : (
             <Empty>Product record missing.</Empty>
+          )}
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Purchase Order" count={po ? 1 : 0}>
+          {po ? (
+            <>
+              <Link href={`/purchase-orders/${po.id}`} className="text-blue-600 hover:underline font-medium">
+                PO #{po.number || po.id}
+              </Link>
+              <p className="text-gray-500 text-sm mt-1">
+                ID: <span className="font-mono">{po.id}</span>
+                {po.status && <> · <Badge variant={po.status === 'Finished' ? 'success' : 'default'}>{po.status}</Badge></>}
+                {po.total != null && <> · Total: {fmtMoney(po.total)}</>}
+                {po.created_at && <> · {fmtDate(po.created_at)}</>}
+              </p>
+              {po.vendor && (
+                <p className="text-gray-500 text-sm mt-1">
+                  Vendor: {typeof po.vendor === 'string' ? po.vendor : (po.vendor.name || po.vendor.business_name || '—')}
+                </p>
+              )}
+              {poLineItem && (
+                <p className="text-gray-500 text-sm mt-1">
+                  Line: {poLineItem.sku ? <span className="font-mono">{poLineItem.sku}</span> + ' · ' : ''}
+                  {poLineItem.cost != null && <>cost {fmtMoney(poLineItem.cost)}</>}
+                </p>
+              )}
+              <p className="text-xs text-gray-400 mt-1">Resolved via Syncro web serial-history (the API can&rsquo;t expose this).</p>
+              {po.raw_json && <RawJsonView rawJson={po.raw_json} label="PO Raw JSON" />}
+              {!po.raw_json && po.line_items && <RawJsonView rawJson={JSON.stringify(po)} label="PO Raw JSON" />}
+            </>
+          ) : (
+            <Empty>{poEmptyMessage}</Empty>
           )}
         </CollapsibleSection>
 

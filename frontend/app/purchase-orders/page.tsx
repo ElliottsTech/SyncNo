@@ -89,7 +89,15 @@ export default function PurchaseOrdersPage() {
     {
       key: 'number', label: 'PO #',
       render: (v: string, row: any) => (
-        <Link href={`/purchase-orders/${row.id}`} className="text-blue-600 hover:underline font-medium">{v}</Link>
+        <span className="flex items-center gap-1.5">
+          <Link href={`/purchase-orders/${row.id}`} className="text-blue-600 hover:underline font-medium">{v}</Link>
+          {row.attachments_count > 0 && (
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="text-gray-500 shrink-0" role="img" aria-label={`${row.attachments_count} attachment(s) from QuickBooks`}>
+              <title>{`${row.attachments_count} attachment(s) from QuickBooks`}</title>
+              <path d="M11.5 4.5L5 11a2 2 0 102.83 2.83L13.5 8.5a3.5 3.5 0 00-4.95-4.95L3.4 8.7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          )}
+        </span>
       ),
     },
     {

@@ -32,7 +32,20 @@ router.get('/', (req, res) => {
   }
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const validSorts = ['name', 'status', 'start_date', 'end_date', 'created_at', 'updated_at'];
+  // contract_amount is stored as TEXT — CAST to REAL for numeric ordering.
+  // likelihood is TEXT (often a percentage string like "50%") — keep as text sort
+  // so values like "10%" / "50%" / "90%" compare as written.
+  const sortExprs = {
+    name: 'name',
+    status: 'status',
+    contract_amount: 'CAST(contract_amount AS REAL)',
+    likelihood: 'COALESCE(likelihood, \'\')',
+    start_date: 'start_date',
+    end_date: 'end_date',
+    created_at: 'created_at',
+    updated_at: 'updated_at',
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'name';
   const safeDir = sortDir === 'desc' ? 'DESC' : 'ASC';
 
@@ -41,7 +54,7 @@ router.get('/', (req, res) => {
     SELECT id, name, customer_id, contract_amount, start_date, end_date,
            status, likelihood, created_at, updated_at, synced
     FROM contracts ${whereStr}
-    ORDER BY ${safeSort} ${safeDir}
+    ORDER BY ${sortExprs[safeSort]} ${safeDir}, id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

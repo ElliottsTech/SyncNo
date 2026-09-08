@@ -295,7 +295,10 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
   vendor TEXT,
   location TEXT,
   line_items TEXT,
-  synced INTEGER DEFAULT 0
+  synced INTEGER DEFAULT 0,
+  qbo_id TEXT,
+  attachments_count INTEGER DEFAULT 0,
+  attachments_synced_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS ticket_comments (

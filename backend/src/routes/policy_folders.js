@@ -32,10 +32,18 @@ router.get('/', (req, res) => {
   }
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const validSorts = ['name', 'created_at', 'updated_at', 'asset_count'];
+  const sortExprs = {
+    name: 'p.name',
+    created_at: 'p.created_at',
+    updated_at: 'p.updated_at',
+    asset_count: 'asset_count',
+    customer_name: 'COALESCE(c.business_name, c.fullname, \'\')',
+    effective_policy_id: 'p.effective_policy_id',
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'name';
   const safeDir = sortDir === 'desc' ? 'DESC' : 'ASC';
-  const orderExpr = safeSort === 'asset_count' ? 'asset_count' : `p.${safeSort}`;
+  const orderExpr = sortExprs[safeSort];
 
   const countRow = db.prepare(`SELECT COUNT(*) as total FROM policy_folders p ${whereStr}`).get(...params);
   const rows = db.prepare(`
@@ -48,7 +56,7 @@ router.get('/', (req, res) => {
     FROM policy_folders p
     LEFT JOIN customers c ON c.id = p.customer_id
     ${whereStr}
-    ORDER BY ${orderExpr} ${safeDir}
+    ORDER BY ${orderExpr} ${safeDir}, p.id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

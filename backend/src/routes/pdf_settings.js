@@ -92,6 +92,7 @@ router.get('/', requireAdmin, (req, res) => {
     abnLabel:      getSetting(COMPANY_KEYS.abnLabel) || 'ABN',
     abn:           getSetting(COMPANY_KEYS.abn) || '',
     taxLabel:      getSetting(COMPANY_KEYS.taxLabel) || 'Tax',
+    showOnboardingChecklist: getSetting('show_onboarding_checklist') !== 'false',
   };
 
   const templates = {};
@@ -106,8 +107,49 @@ router.get('/', requireAdmin, (req, res) => {
     };
   }
 
-  res.json({ company, templates, logoPresent: logoExists() });
+  res.json({
+    company,
+    templates,
+    logoPresent: logoExists(),
+    checklist: computeChecklistState(templates),
+  });
 });
+
+/**
+ * Determine which onboarding steps are complete. The home page checklist uses
+ * this to render checkmarks. Each step is { id, label, done, hint?, link? }.
+ */
+function computeChecklistState(templates) {
+  // Logo: present if the file exists (we already check logoPresent but the
+  // GET handler hasn't run yet — we need to call logoExists() here).
+  const logoDone = logoExists();
+  // At least one PDF template customized
+  const anyTemplateCustom = Object.values(templates).some(t => t.custom);
+  // MCP token configured
+  const mcpToken = getSetting('mcp_api_token');
+  return [
+    {
+      id: 'logo',
+      label: 'Upload your company logo',
+      done: logoDone,
+      link: '/settings/company',
+    },
+    {
+      id: 'templates',
+      label: 'Paste your Syncro PDF templates',
+      done: anyTemplateCustom,
+      hint: 'Settings → PDF Templates — paste the HTML from your existing Syncro invoice/estimate/PO/ticket templates.',
+      link: '/settings/pdf-templates',
+    },
+    {
+      id: 'mcp',
+      label: 'Connect an AI to your data via MCP',
+      done: Boolean(mcpToken),
+      hint: 'Settings → MCP — generate a token and add it to Claude Desktop (or another MCP client).',
+      link: '/settings/mcp',
+    },
+  ];
+}
 
 // ─── POST / — save company text fields ─────────────────────────────────
 const ENV_SAFE = new Set([
@@ -118,6 +160,12 @@ router.post('/', requireAdmin, (req, res) => {
   if (isDemo()) return demoNoop(req, res);
 
   const envUpdates = {};
+  // Handle show_onboarding_checklist specially (boolean stored as 'true'/'false')
+  if (req.body.showOnboardingChecklist !== undefined) {
+    const val = req.body.showOnboardingChecklist ? 'true' : 'false';
+    setSetting('show_onboarding_checklist', val);
+    process.env.SHOW_ONBOARDING_CHECKLIST = val;
+  }
   for (const [bodyKey, settingKey] of Object.entries(COMPANY_KEYS)) {
     if (req.body[bodyKey] === undefined) continue;
     const val = String(req.body[bodyKey]);
@@ -201,6 +249,57 @@ router.delete('/logo', requireAdmin, (req, res) => {
     return res.status(500).json({ error: `Failed to remove logo: ${e.message}` });
   }
   res.json({ ok: true, logoPresent: false });
+});
+
+// POST /api/pdf-settings/preview/:type
+// Fill the supplied template HTML with a sample record and return the rendered
+// HTML for the settings-page preview pane. Read-only — does not save anything.
+router.post('/preview/:type', requireAdmin, async (req, res) => {
+  const type = req.params.type;
+  const html = String(req.body.html || '');
+  if (!html) return res.status(400).json({ error: 'Missing html in body' });
+  try {
+    const { previewTemplate } = await import('../services/pdf.js');
+    const rendered = await previewTemplate(type, html);
+    res.json({ html: rendered });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/pdf-settings/checklist
+// Returns the onboarding-checklist state (which steps are done) + whether the
+// checklist is enabled. Used by the home page. Admin-only.
+router.get('/checklist', requireAdmin, (req, res) => {
+  const enabled = getSetting('show_onboarding_checklist') !== 'false';
+  // Build template state the same way GET / does, but without re-reading the
+  // template HTML bodies (we only care about custom-flags here).
+  const templates = {};
+  for (const type of Object.keys(TEMPLATE_HTML_KEYS)) {
+    templates[type] = { custom: Boolean(getSetting(TEMPLATE_HTML_KEYS[type])) };
+  }
+  res.json({
+    enabled,
+    steps: computeChecklistState(templates),
+  });
+});
+
+// POST /api/pdf-settings/checklist/dismiss
+// Hide the onboarding checklist. Sets the setting to 'false'.
+router.post('/checklist/dismiss', requireAdmin, (req, res) => {
+  if (isDemo()) return demoNoop(req, res);
+  setSetting('show_onboarding_checklist', 'false');
+  process.env.SHOW_ONBOARDING_CHECKLIST = 'false';
+  res.json({ ok: true });
+});
+
+// POST /api/pdf-settings/checklist/restore
+// Show the onboarding checklist again. Sets the setting to 'true'.
+router.post('/checklist/restore', requireAdmin, (req, res) => {
+  if (isDemo()) return demoNoop(req, res);
+  setSetting('show_onboarding_checklist', 'true');
+  process.env.SHOW_ONBOARDING_CHECKLIST = 'true';
+  res.json({ ok: true });
 });
 
 // ─── Exported helpers reused by the PDF service ────────────────────────

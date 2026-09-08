@@ -138,7 +138,9 @@ export default function Sidebar() {
 
   return (
     <aside className="w-56 bg-gray-900 text-white h-screen p-4 flex flex-col sticky top-0 overflow-y-auto">
-      <img src="/SyncNo.png" alt="SyncNo" className="w-[75%] mx-auto mb-6 object-contain" />
+      <Link href="/" className="block mb-6 hover:opacity-80 transition-opacity" title="Go to home">
+        <img src="/SyncNo.png" alt="SyncNo" className="w-[75%] mx-auto object-contain" />
+      </Link>
       <Link
         href="/search"
         className={`flex items-center gap-2 px-3 py-2 rounded mb-2 text-sm ${

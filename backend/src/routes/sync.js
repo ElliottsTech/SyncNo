@@ -4,6 +4,7 @@ import { isDemo, demoNoop } from '../demo.js';
 import fs from 'fs';
 import path from 'path';
 import { getSetting, setSetting, mask, updateEnvFile } from '../lib/settings.js';
+import { getWebSessionCredentials, findSerialPoId, fetchPoAttachments, SyncroSessionExpired } from '../lib/syncroSession.js';
 
 const router = Router();
 
@@ -101,6 +102,12 @@ try {
   const db = getDb();
   db.prepare("ALTER TABLE product_serials ADD COLUMN line_item_id INTEGER").run();
 } catch (_) {}
+// Serial → PO link columns (serial_po_links sync job). po_id semantics:
+//   NULL = not yet looked up; 0 = looked up, no PO found; >0 = the PO id.
+try { getDb().prepare("ALTER TABLE product_serials ADD COLUMN po_id INTEGER").run(); } catch (_) {}
+try { getDb().prepare("ALTER TABLE product_serials ADD COLUMN po_synced_at TEXT").run(); } catch (_) {}
+// Index for the PO→serials reverse lookup (PO detail page queries by po_id).
+try { getDb().prepare("CREATE INDEX IF NOT EXISTS idx_product_serials_po ON product_serials(po_id)").run(); } catch (_) {}
 try {
   const db = getDb();
   db.prepare("CREATE INDEX IF NOT EXISTS idx_product_serials_serial ON product_serials(serial_number)").run();
@@ -298,7 +305,7 @@ router.get('/status', (req, res) => {
 
 router.get('/last-results', (req, res) => {
   const db = getDb();
-  const entities = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
+  const entities = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results', 'serial_po_links', 'po_attachments_syncro'];
   const results = {};
   for (const ent of entities) {
     const state = getSyncState(ent);
@@ -306,9 +313,21 @@ router.get('/last-results', (req, res) => {
     try {
       // Entity name matches table name for all current entities.
       // Worksheet_results is derived from tickets — count tickets instead.
-      const table = ent === 'worksheet_results' ? 'tickets' : ent;
-      const row = db.prepare(`SELECT COUNT(*) as n FROM "${table}"`).get();
-      dbCount = row.n || 0;
+      // serial_po_links isn't a table — count linked serials instead.
+      // po_attachments_syncro isn't a table — count POs with synced attachments.
+      if (ent === 'worksheet_results') {
+        const row = db.prepare('SELECT COUNT(*) as n FROM tickets').get();
+        dbCount = row.n || 0;
+      } else if (ent === 'serial_po_links') {
+        const r = db.prepare('SELECT COUNT(*) as n FROM product_serials WHERE po_id > 0').get();
+        dbCount = r.n || 0;
+      } else if (ent === 'po_attachments_syncro') {
+        const r = db.prepare('SELECT COUNT(*) as n FROM purchase_orders WHERE attachments_synced_at IS NOT NULL').get();
+        dbCount = r.n || 0;
+      } else {
+        const row = db.prepare(`SELECT COUNT(*) as n FROM "${ent}"`).get();
+        dbCount = row.n || 0;
+      }
     } catch (_) {}
     results[ent] = {
       count: state.last_result_count || 0,
@@ -327,7 +346,7 @@ router.get('/last-results', (req, res) => {
 
 router.get('/progress', (req, res) => {
   const db = getDb();
-  const entities = ['tickets', 'customers', 'contacts', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
+  const entities = ['tickets', 'customers', 'contacts', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results', 'serial_po_links', 'po_attachments_syncro'];
   const out = {};
   for (const ent of entities) out[ent] = getSyncState(ent);
   res.json(out);
@@ -618,6 +637,159 @@ router.post('/trigger', requireAdmin, async (req, res) => {
       console.error('sync runner threw synchronously:', err.message);
     }
   });
+});
+
+// ─── API: Link Serials to POs (standalone batch job) ─────────────────────────
+// A one-off maintenance job (NOT part of the entity grid / Sync All). Walks
+// every product_serials row, scrapes the serial-history endpoint with the
+// stored web-session cookie, and persists po_id. Only unlinked rows (po_id IS
+// NULL) are processed unless forceAll=true. Resumable via the detail_cursor.
+// Uses its own syncId so it can run/cancel independently of entity syncs.
+
+router.post('/link-serial-pos', requireAdmin, async (req, res) => {
+  const forceAll = req.query.forceAll === 'true';
+
+  if (isDemo()) {
+    return res.json({ ok: true, demo: true, message: 'Serial→PO link sync not available in demo mode' });
+  }
+
+  const apiKey = getSetting('syncro_api_key');
+  const subdomain = getSetting('syncro_subdomain');
+  if (!apiKey || !subdomain) {
+    return res.status(400).json({ error: 'Syncro not configured' });
+  }
+
+  const syncId = 'serial_po_links';
+  // Don't start if already running (entity sync or a prior link run).
+  const existing = getSyncState('serial_po_links');
+  if (existing.phase !== 'idle' && existing.phase !== 'error') {
+    return res.status(409).json({
+      error: 'Serial→PO link job already in progress',
+      entity: 'serial_po_links',
+      phase: existing.phase,
+    });
+  }
+  syncAbort.delete(syncId);
+
+  // SSE response — same setup as /trigger.
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+  liveClients.push(res);
+
+  const db = getDb();
+  const log = (action, details) => {
+    try {
+      db.prepare(`INSERT INTO logs (action, details, ip_address) VALUES (?, ?, ?)`)
+        .run(action, details, null);
+    } catch (_) {}
+  };
+  log('SYNC_START', `serial_po_links triggered, forceAll: ${forceAll}`);
+
+  res.write(`data: ${JSON.stringify({ accepted: true, entities: ['serial_po_links'] })}\n\n`);
+
+  // Run via runSync so it shares the closure's throttle/abort/emit helpers.
+  setImmediate(() => {
+    try {
+      const runner = runSync(['serial_po_links'], forceAll, apiKey, subdomain, res, syncId, {});
+      Promise.resolve(runner).catch(err => console.error('serial_po_links runSync unhandled:', err.message));
+    } catch (err) {
+      console.error('serial_po_links runner threw synchronously:', err.message);
+    }
+  });
+});
+
+// Cancel the serial→PO link job. Preserves the cursor so a re-run resumes.
+//
+// Always reconciles DB state — even when no in-memory AbortController exists
+// (e.g. after a backend restart wiped it). Without this, the persisted
+// phase stays "running" and the frontend's Cancel button leaves the Link
+// button greyed out forever (see sync.js startup reconciliation too).
+router.delete('/link-serial-pos', requireAdmin, (req, res) => {
+  const syncId = 'serial_po_links';
+  const cancelled = abortSync(syncId);
+  try {
+    const st = getSyncState('serial_po_links');
+    if (st.phase !== 'idle' && st.phase !== 'error') {
+      st.phase = 'idle';
+      st.last_result_error = null; // cancellation is not an error — leave the cursor for resume
+      saveSyncState(st);
+    }
+  } catch (_) {}
+  res.json({ ok: true, cancelled });
+});
+
+// ─── API: Sync PO Attachments from Syncro (standalone batch job) ─────────────
+// Walks every purchase order, scrapes attachments from the Syncro web PO show
+// page (session cookie), downloads them to disk. Only unsynced POs unless
+// forceAll. Resumable via detail_cursor. Own syncId for independent cancel.
+
+router.post('/sync-po-attachments', requireAdmin, async (req, res) => {
+  const forceAll = req.query.forceAll === 'true';
+
+  if (isDemo()) {
+    return res.json({ ok: true, demo: true, message: 'PO attachment sync not available in demo mode' });
+  }
+
+  const apiKey = getSetting('syncro_api_key');
+  const subdomain = getSetting('syncro_subdomain');
+  if (!apiKey || !subdomain) {
+    return res.status(400).json({ error: 'Syncro not configured' });
+  }
+
+  const syncId = 'po_attachments_syncro';
+  const existing = getSyncState('po_attachments_syncro');
+  if (existing.phase !== 'idle' && existing.phase !== 'error') {
+    return res.status(409).json({
+      error: 'PO attachment sync already in progress',
+      entity: 'po_attachments_syncro',
+      phase: existing.phase,
+    });
+  }
+  syncAbort.delete(syncId);
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+  liveClients.push(res);
+
+  const db = getDb();
+  const log = (action, details) => {
+    try {
+      db.prepare(`INSERT INTO logs (action, details, ip_address) VALUES (?, ?, ?)`)
+        .run(action, details, null);
+    } catch (_) {}
+  };
+  log('SYNC_START', `po_attachments_syncro triggered, forceAll: ${forceAll}`);
+
+  res.write(`data: ${JSON.stringify({ accepted: true, entities: ['po_attachments_syncro'] })}\n\n`);
+
+  setImmediate(() => {
+    try {
+      const runner = runSync(['po_attachments_syncro'], forceAll, apiKey, subdomain, res, syncId, {});
+      Promise.resolve(runner).catch(err => console.error('po_attachments_syncro runSync unhandled:', err.message));
+    } catch (err) {
+      console.error('po_attachments_syncro runner threw synchronously:', err.message);
+    }
+  });
+});
+
+router.delete('/sync-po-attachments', requireAdmin, (req, res) => {
+  const syncId = 'po_attachments_syncro';
+  const cancelled = abortSync(syncId);
+  try {
+    const st = getSyncState('po_attachments_syncro');
+    if (st.phase !== 'idle' && st.phase !== 'error') {
+      st.phase = 'idle';
+      st.last_result_error = null; // cancellation is not an error
+      saveSyncState(st);
+    }
+  } catch (_) {}
+  res.json({ ok: true, cancelled });
 });
 
 // ─── Demo fake sync runner ────────────────────────────────────────────────────
@@ -1106,6 +1278,11 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
     const isInitialSync = !state.last_sync || forceAll;
 
+    // On delta/resume runs, ALSO include any ticket whose detail was never fetched
+    // (has_detail = 0 — the red rows in the UI). Initial / forceAll syncs fetch
+    // everything, no clause needed.
+    const detailFilterClause = isInitialSync ? '' : "AND (status != 'Resolved' OR has_detail = 0)";
+
     // ── Catalog phase ─────────────────────────────────────────────────────────
     state.phase = 'catalog';
     saveSyncState(state);
@@ -1135,7 +1312,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           // Rebuild seenTicketIds from DB so markDeletedTickets doesn't soft-delete
           // tickets from pages 1..lastPageSynced that we won't re-visit this run.
           // Match the catalog's Resolved filter for this run type.
-          const resumeResolvedClause = isInitialSync ? '' : "AND status != 'Resolved'";
+          const resumeResolvedClause = detailFilterClause;
           const existingRows = db.prepare(`SELECT id FROM tickets WHERE deleted_at IS NULL ${resumeResolvedClause}`).all();
           for (const r of existingRows) seenTicketIds.add(r.id);
           startPage = lastPageSynced + 1;
@@ -1175,7 +1352,12 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
         const insertMany = db.transaction((ticketList) => {
           for (const t of ticketList) {
-            if (!isInitialSync && t.status === 'Resolved') continue;
+            // On delta, skip Resolved only if already fully synced. Resolved
+            // rows with has_detail=0 (red) must be re-cataloged.
+            if (!isInitialSync && t.status === 'Resolved') {
+              const existing = db.prepare('SELECT has_detail FROM tickets WHERE id = ?').get(t.id);
+              if (existing && existing.has_detail === 1) continue;
+            }
             seenTicketIds.add(t.id);
             db.prepare(`
               INSERT OR REPLACE INTO tickets (id, number, subject, status, created_at, updated_at, raw_json, has_detail, synced_at, deleted_at)
@@ -1220,8 +1402,10 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
         const insertMany = db.transaction((ticketList) => {
           for (const t of ticketList) {
-            if (!isInitialSync && t.status === 'Resolved') continue;
             const existing = db.prepare('SELECT has_detail FROM tickets WHERE id = ?').get(t.id);
+            // On delta, skip Resolved only if already fully synced. Resolved
+            // rows with has_detail=0 (red) must be re-cataloged.
+            if (!isInitialSync && t.status === 'Resolved' && existing && existing.has_detail === 1) continue;
             if (existing && existing.has_detail === 1) {
               // Already fully synced — stop catalog here
               return;
@@ -1272,8 +1456,9 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
   async function finishCatalog(state, isInitialSync) {
     // detail_total = tickets in DB the detail phase will actually fetch.
-    // Initial/forceAll sync fetches everything; delta skips Resolved.
-    const detailResolvedClause = isInitialSync ? '' : "AND status != 'Resolved'";
+    // Initial/forceAll sync fetches everything; delta skips Resolved — except
+    // for tickets that were never detailed (the red rows).
+    const detailResolvedClause = detailFilterClause;
     const row = db.prepare(`SELECT COUNT(*) as cnt FROM tickets WHERE deleted_at IS NULL ${detailResolvedClause}`).get();
     state.detail_total = row.cnt;
     state.detail_cursor = null;
@@ -1328,8 +1513,9 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
       let synced = state.detail_synced;
       let cursor = state.detail_cursor;
 
-      // Build query. Initial/forceAll re-fetches everything; delta skips Resolved.
-      const detailResolvedClause = isInitialSync ? '' : "AND status != 'Resolved'";
+      // Build query. Initial/forceAll re-fetches everything; delta skips Resolved
+      // (except for tickets that were never detailed — the red rows).
+      const detailResolvedClause = detailFilterClause;
       let query, params;
       if (!cursor) {
         query = `SELECT id, status FROM tickets WHERE deleted_at IS NULL ${detailResolvedClause} ORDER BY id ASC`;
@@ -2559,35 +2745,34 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
       state.phase = 'idle';
       state.last_result_count = 0;
       state.last_result_error = null;
+      state.total_to_sync = 0;
+      state.detail_total = 0;
       saveSyncState(state);
       return;
     }
     // Syncro returns 0 serials without a status filter — fetch each status variant separately.
     const SERIAL_STATUSES = ['reserved', 'sold', 'returned', 'in_transfer', 'breakage', 'used_in_refurb', 'in_stock'];
-    state.phase = 'detail';
-    state.detail_total = serialized.length;
-    state.total_to_sync = serialized.length;
-    state.detail_synced = 0;
-    saveSyncState(state);
-    let processed = 0;
-    let totalSerials = 0;
+
     const insertSerial = db.prepare(`
       INSERT OR REPLACE INTO product_serials (id, product_id, serial_number, account_id, status, line_item_id, created_at, updated_at, raw_json)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    try {
-      for (const p of serialized) {
+
+    // Iterate every (product × status) combination, paginating until an empty
+    // page comes back. Syncro's serials endpoint returns no meta.total, so the
+    // only way to know the real count is to discover it ourselves. `mode` is
+    // 'count' (no DB writes) or 'fetch' (upsert into product_serials).
+    const iterProduct = async (p, mode) => {
+      let productCount = 0;
+      for (const st of SERIAL_STATUSES) {
         checkAbort();
-        let productCount = 0;
-        for (const st of SERIAL_STATUSES) {
-          checkAbort();
-          try {
-            // Paginate each status until an empty page comes back — Syncro returns no meta.total_pages.
-            for (let page = 1; ; page++) {
-              checkAbort();
-              const data = await fetchJson(`${baseUrl}/products/${p.id}/product_serials?status=${st}&page=${page}&per_page=100`, 'products_serials');
-              const serials = data.product_serials || [];
-              if (serials.length === 0) break;
+        try {
+          for (let page = 1; ; page++) {
+            checkAbort();
+            const data = await fetchJson(`${baseUrl}/products/${p.id}/product_serials?status=${st}&page=${page}&per_page=100`, 'products_serials');
+            const serials = data.product_serials || [];
+            if (serials.length === 0) break;
+            if (mode === 'fetch') {
               const insertMany = db.transaction((rows) => {
                 for (const s of rows) {
                   insertSerial.run(
@@ -2600,26 +2785,75 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
                 }
               });
               insertMany(serials);
-              productCount += serials.length;
-              if (serials.length < 100) break;
             }
-          } catch (e) {
-            if (syncSignal.aborted) throw new Error('Sync cancelled');
-            results.errors = results.errors || [];
-            results.errors.push(`product_serials/${p.id}?status=${st}: ${e.message}`);
+            productCount += serials.length;
+            if (serials.length < 100) break;
           }
+        } catch (e) {
+          if (syncSignal.aborted) throw new Error('Sync cancelled');
+          results.errors = results.errors || [];
+          results.errors.push(`product_serials/${p.id}?status=${st}: ${e.message}`);
         }
+      }
+      return productCount;
+    };
+
+    // Throttle between products (same as original).
+    const throttle = () => new Promise((resolve, reject) => {
+      const t = setTimeout(resolve, 350);
+      syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
+    }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+
+    try {
+      // ── Phase 1: catalog / discovery ──────────────────────────────────────
+      // Page through every (product × status) once to learn the true total.
+      // No DB writes; just count. state.total_to_sync is then the real number
+      // of serials the detail pass will upsert (not the number of products).
+      state.phase = 'catalog';
+      state.detail_synced = 0;
+      state.detail_total = 0;
+      state.total_to_sync = 0;
+      saveSyncState(state);
+      emitEvent({ phase: 'product_serials', status: 'progress', subphase: 'catalog', message: `Discovering serials across ${serialized.length} products...` }, res);
+
+      let discoveredTotal = 0;
+      for (const p of serialized) {
+        checkAbort();
+        discoveredTotal += await iterProduct(p, 'count');
+        await throttle();
+      }
+
+      state.total_to_sync = discoveredTotal;
+      state.detail_total = discoveredTotal;
+      state.detail_synced = 0;
+      saveSyncState(state);
+      emitEvent({ phase: 'product_serials', status: 'progress', subphase: 'catalog_done', message: `Discovered ${discoveredTotal} serials` }, res);
+
+      // ── Phase 2: detail (actual upsert) ───────────────────────────────────
+      state.phase = 'detail';
+      saveSyncState(state);
+
+      let processed = 0;
+      let totalSerials = 0;
+      for (const p of serialized) {
+        checkAbort();
+        const productCount = await iterProduct(p, 'fetch');
         totalSerials += productCount;
         processed++;
-        state.detail_synced = processed;
+        state.detail_synced = totalSerials;
         saveSyncState(state);
-        emitEvent({ phase: 'product_serials', status: 'progress', current: processed, total: serialized.length, message: `serials ${processed}/${serialized.length} — ${productCount} for ${p.name}`, currentRecordId: p.id, currentRecordName: p.name }, res);
-        await new Promise((resolve, reject) => {
-          const t = setTimeout(resolve, 350);
-          syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-        }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+        emitEvent({
+          phase: 'product_serials',
+          status: 'progress',
+          current: totalSerials,
+          total: discoveredTotal,
+          message: `serials ${totalSerials}/${discoveredTotal} — ${productCount} for ${p.name}`,
+          currentRecordId: p.id,
+          currentRecordName: p.name,
+        }, res);
+        await throttle();
       }
-      log('SYNC_ENTITY', `Product serials: iterated ${serialized.length} serialized products, ${totalSerials} serials upserted`);
+      log('SYNC_ENTITY', `Product serials: iterated ${serialized.length} serialized products, ${totalSerials} serials upserted (discovered ${discoveredTotal})`);
       state.phase = 'idle';
       state.last_result_count = totalSerials;
       state.last_result_error = null;
@@ -2634,6 +2868,416 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
       results.errors.push(`product_serials: ${e.message}`);
       log('SYNC_ERROR', e.message);
       emitEvent({ phase: 'product_serials', status: 'error', error: e.message }, res);
+    }
+  }
+
+  // ─── Serial → PO link (web-cookie scrape) ─────────────────────────────────
+  // Batch job: for every product_serials row not yet linked (po_id IS NULL),
+  // scrape the internal serial-history endpoint with the stored web-session
+  // cookie and persist the resolved PO id. Syncro won't always be reachable, so
+  // the link is captured once and stored permanently.
+  //
+  // po_id semantics: NULL = not yet looked up; 0 = looked up, no PO found; >0 = PO id.
+  // The 0 sentinel prevents re-scraping serials that genuinely have no PO.
+  //
+  // Cursor-resumable (state.detail_cursor), throttled via the global gate, and
+  // abort-aware — mirrors syncProductSerials + syncTicketDetails patterns.
+  async function syncSerialPoLinks({ forceAll: forceAllLink } = {}) {
+    emitEvent({ phase: 'serial_po_links', status: 'started' }, res);
+    const state = getSyncState('serial_po_links');
+
+    // Short-circuit if there are no serials at all.
+    const anyRow = db.prepare('SELECT 1 FROM product_serials LIMIT 1').get();
+    if (!anyRow) {
+      emitEvent({ phase: 'serial_po_links', status: 'progress', message: 'No serials in DB — run a Product Serials sync first' }, res);
+      state.phase = 'idle';
+      state.last_result_count = 0;
+      state.last_result_error = null;
+      saveSyncState(state);
+      emitEvent({ phase: 'serial_po_links', status: 'done', count: 0 }, res);
+      return;
+    }
+
+    // Web-session cookie is required — can't scrape without it.
+    const creds = getWebSessionCredentials();
+    if (!creds) {
+      emitEvent({ phase: 'serial_po_links', status: 'progress', message: 'Web session not configured — paste a cookie in Config → Syncro Web Session' }, res);
+      state.phase = 'idle';
+      state.last_result_count = 0;
+      state.last_result_error = 'Web session not configured';
+      saveSyncState(state);
+      emitEvent({ phase: 'serial_po_links', status: 'error', error: 'Web session not configured — paste a cookie in Config → Syncro Web Session' }, res);
+      return;
+    }
+
+    // Count rows to process: unlinked (po_id IS NULL) unless forceAll re-links all.
+    const countRow = db.prepare(`SELECT COUNT(*) as cnt FROM product_serials ${forceAllLink ? '' : 'WHERE po_id IS NULL'}`).get();
+    const total = countRow.cnt;
+
+    if (total === 0) {
+      emitEvent({ phase: 'serial_po_links', status: 'progress', message: forceAllLink ? 'No serials to link' : 'All serials already linked — use Re-link all to refresh' }, res);
+      state.phase = 'idle';
+      state.last_result_count = 0;
+      state.last_result_error = null;
+      state.detail_cursor = null;
+      state.detail_synced = 0;
+      saveSyncState(state);
+      emitEvent({ phase: 'serial_po_links', status: 'done', count: 0, message: 'Nothing to link' }, res);
+      return;
+    }
+
+    state.phase = 'detail';
+    state.detail_total = total;
+    state.total_to_sync = total;
+    // On a fresh (non-resume) run or forceAll, reset the cursor.
+    if (forceAllLink) {
+      state.detail_cursor = null;
+      state.detail_synced = 0;
+    }
+    state.last_result_error = null;
+    saveSyncState(state);
+
+    const cursor = state.detail_cursor ? Number(state.detail_cursor) : null;
+    // product_serials has no deleted_at column — just filter on po_id (+ cursor).
+    // Build WHERE clause from bare conditions (no leading "AND").
+    const conds = [];
+    if (!forceAllLink) conds.push('po_id IS NULL');
+    if (cursor) conds.push('id > ?');
+    const whereStr = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
+    const query = `SELECT id, product_id, serial_number FROM product_serials ${whereStr} ORDER BY id ASC`;
+    const params = cursor ? [cursor] : [];
+
+    const serials = db.prepare(query).all(...params);
+
+    let linked = 0;
+    let noPo = 0;
+    let processed = state.detail_synced || 0;
+    const errorCount = () => (results.errors || []).length;
+    const updatePo = db.prepare('UPDATE product_serials SET po_id = ?, po_synced_at = datetime(\'now\') WHERE id = ?');
+    const startedAt = Date.now();
+
+    // Build the structured stats payload emitted with every progress/done/error event.
+    // `etaMs` is derived from the per-row rate so far.
+    const linkStats = () => {
+      const remaining = total - processed;
+      const elapsedMs = Date.now() - startedAt;
+      const perRowMs = processed > 0 ? elapsedMs / processed : 0;
+      const etaMs = remaining > 0 && perRowMs > 0 ? Math.round(remaining * perRowMs) : null;
+      return { linked, noPo, errors: errorCount(), remaining, etaMs, elapsedMs };
+    };
+
+    emitEvent({
+      phase: 'serial_po_links', status: 'progress',
+      current: processed, total,
+      message: `Linking ${total} serial${total === 1 ? '' : 's'} to POs via web session…`,
+      ...linkStats(),
+    }, res);
+
+    try {
+      for (const s of serials) {
+        checkAbort();
+        // Global rate-limit gate — this hits Syncro's web app, same pool as the API.
+        await throttleRequest();
+        let poId = null;
+        try {
+          const found = await findSerialPoId({
+            subdomain: creds.subdomain,
+            productId: s.product_id,
+            serial: s.serial_number,
+            cookie: creds.cookie,
+          });
+          poId = found.poId ? Number(found.poId) : 0;
+        } catch (e) {
+          if (e instanceof SyncroSessionExpired) {
+            // Cookie died mid-run — stop cleanly, preserve the cursor so a re-run
+            // (after re-pasting the cookie) resumes here.
+            state.phase = 'error';
+            state.last_result_error = 'Web session cookie expired — re-paste in Config → Syncro Web Session';
+            saveSyncState(state);
+            log('SYNC_PAUSE', `serial_po_links: cookie expired at serial ${s.id} (${s.serial_number}) — linked ${linked} so far`);
+            emitEvent({
+              phase: 'serial_po_links', status: 'error',
+              error: 'Web session cookie expired — re-paste a fresh cookie in Config, then re-run. Progress is saved.',
+              current: processed, total, count: linked,
+              ...linkStats(),
+            }, res);
+            return;
+          }
+          // Other errors (network, unexpected status) — record the error for this
+          // row but keep going; don't write po_id so it's retried next run.
+          results.errors = results.errors || [];
+          results.errors.push(`serial_po_links/${s.id} (${s.serial_number}): ${e.message}`);
+          poId = null; // leave NULL → retried next run
+        }
+
+        if (poId !== null) {
+          updatePo.run(poId, s.id);
+          if (poId > 0) linked++;
+          else noPo++;
+        }
+
+        processed++;
+        state.detail_cursor = String(s.id);
+        state.detail_synced = processed;
+        saveSyncState(state);
+
+        emitEvent({
+          phase: 'serial_po_links', status: 'progress',
+          current: processed, total,
+          message: poId > 0 ? `${processed}/${total} — ${s.serial_number} → PO ${poId}`
+                 : poId === 0 ? `${processed}/${total} — ${s.serial_number} (no PO)`
+                 : `${processed}/${total} — ${s.serial_number} (error, will retry)`,
+          currentRecordId: s.id,
+          currentRecordName: s.serial_number,
+          ...linkStats(),
+        }, res);
+
+        // Abort-aware inter-row delay (matches syncProductSerials).
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(resolve, 350);
+          syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
+        }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+      }
+
+      // Done — clear cursor so the next run starts fresh (unless re-linked).
+      state.phase = 'idle';
+      state.last_result_count = linked;
+      state.last_result_error = null;
+      state.detail_cursor = null;
+      state.detail_synced = 0;
+      saveSyncState(state);
+      log('SYNC_ENTITY', `serial_po_links: linked ${linked}, no-PO ${noPo}, errors ${(results.errors || []).length}`);
+      emitEvent({
+        phase: 'serial_po_links', status: 'done',
+        count: linked,
+        message: `Linked ${linked} serial${linked === 1 ? '' : 's'} to POs · ${noPo} had no PO · ${(results.errors || []).length} error${(results.errors || []).length === 1 ? '' : 's'}`,
+        ...linkStats(),
+      }, res);
+    } catch (e) {
+      // Re-read FRESH state — the stale `state` object from the top of this
+      // function would overwrite the cancel handler's phase='idle'.
+      const fresh = getSyncState('serial_po_links');
+      if (e.message === 'Sync cancelled') {
+        fresh.phase = 'idle';
+        fresh.last_result_error = null;
+        saveSyncState(fresh);
+        emitEvent({ phase: 'serial_po_links', status: 'cancelled', count: linked, message: `Cancelled — linked ${linked} so far. Cursor preserved; re-run to resume.`, ...linkStats() }, res);
+      } else {
+        fresh.phase = 'error';
+        fresh.last_result_error = e.message;
+        saveSyncState(fresh);
+        results.errors = results.errors || [];
+        results.errors.push(`serial_po_links: ${e.message}`);
+        log('SYNC_ERROR', e.message);
+        emitEvent({
+          phase: 'serial_po_links', status: 'error', error: e.message,
+          current: processed, total, count: linked,
+          ...linkStats(),
+        }, res);
+      }
+    }
+  }
+
+  // ─── PO Attachments batch (web-cookie scrape) ──────────────────────────────
+  // Walks every purchase order, scrapes its attachments from the Syncro web PO
+  // show page (session cookie), and downloads them to local disk. Mirrors
+  // syncSerialPoLinks: cursor-resumable, throttled, abort-aware, cookie-expiry
+  // handling, structured stats + ETA.
+  async function syncPoAttachmentsBatch({ forceAll: forceAllAtts } = {}) {
+    emitEvent({ phase: 'po_attachments_syncro', status: 'started' }, res);
+    const state = getSyncState('po_attachments_syncro');
+
+    const anyRow = db.prepare('SELECT 1 FROM purchase_orders LIMIT 1').get();
+    if (!anyRow) {
+      emitEvent({ phase: 'po_attachments_syncro', status: 'progress', message: 'No POs in DB — run a Purchase Orders sync first' }, res);
+      state.phase = 'idle';
+      state.last_result_count = 0;
+      state.last_result_error = null;
+      saveSyncState(state);
+      emitEvent({ phase: 'po_attachments_syncro', status: 'done', count: 0 }, res);
+      return;
+    }
+
+    const creds = getWebSessionCredentials();
+    if (!creds) {
+      emitEvent({ phase: 'po_attachments_syncro', status: 'progress', message: 'Web session not configured — paste a cookie in Config → Syncro Web Session' }, res);
+      state.phase = 'idle';
+      state.last_result_count = 0;
+      state.last_result_error = 'Web session not configured';
+      saveSyncState(state);
+      emitEvent({ phase: 'po_attachments_syncro', status: 'error', error: 'Web session not configured — paste a cookie in Config → Syncro Web Session' }, res);
+      return;
+    }
+
+    // Only unsynced POs (attachments_synced_at IS NULL) unless forceAll.
+    const linkClause = forceAllAtts ? '' : 'WHERE attachments_synced_at IS NULL';
+    const countRow = db.prepare(`SELECT COUNT(*) as cnt FROM purchase_orders ${linkClause}`).get();
+    const total = countRow.cnt;
+
+    if (total === 0) {
+      emitEvent({ phase: 'po_attachments_syncro', status: 'progress', message: forceAllAtts ? 'No POs to sync' : 'All POs already synced — use Re-sync all to refresh' }, res);
+      state.phase = 'idle';
+      state.last_result_count = 0;
+      state.last_result_error = null;
+      state.detail_cursor = null;
+      state.detail_synced = 0;
+      saveSyncState(state);
+      emitEvent({ phase: 'po_attachments_syncro', status: 'done', count: 0, message: 'Nothing to sync' }, res);
+      return;
+    }
+
+    state.phase = 'detail';
+    state.detail_total = total;
+    state.total_to_sync = total;
+    if (forceAllAtts) {
+      state.detail_cursor = null;
+      state.detail_synced = 0;
+    }
+    state.last_result_error = null;
+    saveSyncState(state);
+
+    const cursor = state.detail_cursor ? Number(state.detail_cursor) : null;
+    const conds = [];
+    if (!forceAllAtts) conds.push('attachments_synced_at IS NULL');
+    if (cursor) conds.push('id > ?');
+    const whereStr = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
+    const query = `SELECT id, number FROM purchase_orders ${whereStr} ORDER BY id ASC`;
+    const params = cursor ? [cursor] : [];
+    const pos = db.prepare(query).all(...params);
+
+    let downloaded = 0;
+    let skipped = 0;
+    let processed = state.detail_synced || 0;
+    const errorCount = () => (results.errors || []).length;
+    const startedAt = Date.now();
+    const stampPo = db.prepare('UPDATE purchase_orders SET attachments_count = ?, attachments_synced_at = datetime(\'now\') WHERE id = ?');
+
+    const attStats = () => {
+      const remaining = total - processed;
+      const elapsedMs = Date.now() - startedAt;
+      const perRowMs = processed > 0 ? elapsedMs / processed : 0;
+      const etaMs = remaining > 0 && perRowMs > 0 ? Math.round(remaining * perRowMs) : null;
+      return { downloaded, skipped, errors: errorCount(), remaining, etaMs, elapsedMs };
+    };
+
+    emitEvent({
+      phase: 'po_attachments_syncro', status: 'progress',
+      current: processed, total,
+      message: `Syncing attachments for ${total} PO${total === 1 ? '' : 's'} via web session…`,
+      ...attStats(),
+    }, res);
+
+    try {
+      for (const p of pos) {
+        checkAbort();
+        await throttleRequest();
+
+        let poDownloaded = 0;
+        let poSkipped = 0;
+        const poNumber = String(p.number || p.id);
+        const poDir = path.join(ATTACHMENTS_DIR, `po-${poNumber}`);
+
+        try {
+          const attachments = await fetchPoAttachments({ id: p.id });
+          if (attachments.length > 0) {
+            try { fs.mkdirSync(poDir, { recursive: true }); } catch (_) {}
+            for (const att of attachments) {
+              const safeName = sanitizeFilename(att.fileName || `attachment_${att.id || 'unknown'}`);
+              const dest = path.join(poDir, safeName);
+              if (fs.existsSync(dest)) { poSkipped++; continue; }
+              try {
+                const dlResp = await fetch(att.downloadUrl);
+                if (!dlResp.ok) throw new Error(`download HTTP ${dlResp.status}`);
+                const buf = Buffer.from(await dlResp.arrayBuffer());
+                fs.writeFileSync(dest, buf);
+                poDownloaded++;
+              } catch (e) {
+                results.errors = results.errors || [];
+                results.errors.push(`po_attachments/${p.id}/${att.fileName}: ${e.message}`);
+              }
+            }
+          }
+          stampPo.run(poDownloaded + poSkipped, p.id);
+          downloaded += poDownloaded;
+          skipped += poSkipped;
+        } catch (e) {
+          if (e instanceof SyncroSessionExpired) {
+            state.phase = 'error';
+            state.last_result_error = 'Web session cookie expired — re-paste in Config → Syncro Web Session';
+            saveSyncState(state);
+            log('SYNC_PAUSE', `po_attachments_syncro: cookie expired at PO ${p.id} (${p.number}) — downloaded ${downloaded} so far`);
+            emitEvent({
+              phase: 'po_attachments_syncro', status: 'error',
+              error: 'Web session cookie expired — re-paste a fresh cookie in Config, then re-run. Progress is saved.',
+              current: processed, total, count: downloaded,
+              ...attStats(),
+            }, res);
+            return;
+          }
+          results.errors = results.errors || [];
+          results.errors.push(`po_attachments/${p.id} (${p.number}): ${e.message}`);
+          // Stamp as synced with 0 so it's not retried on the next run (non-session errors are likely permanent).
+          stampPo.run(poDownloaded + poSkipped, p.id);
+        }
+
+        processed++;
+        state.detail_cursor = String(p.id);
+        state.detail_synced = processed;
+        saveSyncState(state);
+
+        emitEvent({
+          phase: 'po_attachments_syncro', status: 'progress',
+          current: processed, total,
+          // Per-PO deltas use a "+" prefix so the user can distinguish them
+          // from the cumulative running total shown in the Downloaded/Skipped
+          // counter row above (those come from attStats() and grow across POs).
+          message: `${processed}/${total} — PO ${p.number || p.id}: +${poDownloaded} downloaded, +${poSkipped} skipped (running total: ${downloaded} downloaded, ${skipped} skipped)`,
+          currentRecordId: p.id,
+          currentRecordName: p.number || String(p.id),
+          ...attStats(),
+        }, res);
+
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(resolve, 350);
+          syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
+        }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+      }
+
+      state.phase = 'idle';
+      state.last_result_count = downloaded;
+      state.last_result_error = null;
+      state.detail_cursor = null;
+      state.detail_synced = 0;
+      saveSyncState(state);
+      log('SYNC_ENTITY', `po_attachments_syncro: downloaded ${downloaded}, skipped ${skipped}, errors ${errorCount()}`);
+      emitEvent({
+        phase: 'po_attachments_syncro', status: 'done',
+        count: downloaded,
+        message: `Downloaded ${downloaded} attachment${downloaded === 1 ? '' : 's'} · ${skipped} already on disk · ${errorCount()} error${errorCount() === 1 ? '' : 's'}`,
+        ...attStats(),
+      }, res);
+    } catch (e) {
+      // Re-read FRESH state — the stale `state` object would overwrite the
+      // cancel handler's phase='idle'.
+      const fresh = getSyncState('po_attachments_syncro');
+      if (e.message === 'Sync cancelled') {
+        fresh.phase = 'idle';
+        fresh.last_result_error = null;
+        saveSyncState(fresh);
+        emitEvent({ phase: 'po_attachments_syncro', status: 'cancelled', count: downloaded, message: `Cancelled — downloaded ${downloaded} so far. Cursor preserved; re-run to resume.`, ...attStats() }, res);
+      } else {
+        fresh.phase = 'error';
+        fresh.last_result_error = e.message;
+        saveSyncState(fresh);
+        results.errors = results.errors || [];
+        results.errors.push(`po_attachments_syncro: ${e.message}`);
+        log('SYNC_ERROR', e.message);
+        emitEvent({
+          phase: 'po_attachments_syncro', status: 'error', error: e.message,
+          current: processed, total, count: downloaded,
+          ...attStats(),
+        }, res);
+      }
     }
   }
 
@@ -3258,6 +3902,8 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
       else if (ent === 'products') await syncProducts();
       else if (ent === 'payments') await syncPayments();
       else if (ent === 'product_serials') await syncProductSerials();
+      else if (ent === 'serial_po_links') await syncSerialPoLinks({ forceAll });
+      else if (ent === 'po_attachments_syncro') await syncPoAttachmentsBatch({ forceAll });
       else if (ent === 'appointments') await syncAppointments(options.dateFrom, options.dateTo);
       else if (ent === 'appointment_types') await syncAppointmentTypes(); // no-op — folded into syncAppointments
       else if (ent === 'contracts') await syncContracts();

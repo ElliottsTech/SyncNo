@@ -46,18 +46,23 @@ router.get('/', (req, res) => {
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  // Validate sort column
-  const validSorts = ['business_name', 'fullname', 'email', 'city', 'state', 'created_at', 'disabled'];
+  // Validate sort column. business_name / fullname / display_name all sort by
+  // the same COALESCE expression (business_name || fullname fallback).
+  const sortExprs = {
+    business_name: displayName,
+    fullname: displayName,
+    display_name: displayName,
+    email: 'email',
+    phone: 'COALESCE(phone, \'\')',
+    city: 'city',
+    state: 'state',
+    created_at: 'created_at',
+    disabled: 'disabled',
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'business_name';
   const safeDir = sortDir === 'desc' ? 'DESC' : 'ASC';
-
-  // Order by display_name or specific column
-  let orderBy;
-  if (['business_name', 'fullname'].includes(safeSort)) {
-    orderBy = `${displayName} ${safeDir}`;
-  } else {
-    orderBy = `${safeSort} ${safeDir}`;
-  }
+  const orderBy = `${sortExprs[safeSort]} ${safeDir}, id ASC`;
 
   const countRow = db.prepare(`SELECT COUNT(*) as total FROM customers ${where}`).get(...params);
   const customers = db.prepare(`

@@ -43,10 +43,18 @@ router.get('/', (req, res) => {
   }
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const validSorts = [
-    'name', 'email', 'status', 'created_at', 'updated_at',
-    'mailbox_name', 'ticket_subject', 'business_then_name',
-  ];
+  const sortExprs = {
+    name: 'name',
+    email: 'email',
+    phone: 'COALESCE(phone, \'\')',
+    status: 'status',
+    created_at: 'created_at',
+    updated_at: 'updated_at',
+    mailbox_name: 'mailbox_name',
+    ticket_subject: 'ticket_subject',
+    business_then_name: 'business_then_name',
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'created_at';
   const safeDir = sortDir === 'asc' ? 'ASC' : 'DESC';
 
@@ -58,7 +66,7 @@ router.get('/', (req, res) => {
            mailbox_name, has_attachments, message_read,
            created_at, updated_at, synced
     FROM leads ${whereStr}
-    ORDER BY ${safeSort} ${safeDir}
+    ORDER BY ${sortExprs[safeSort]} ${safeDir}, id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

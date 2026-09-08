@@ -89,7 +89,31 @@ router.get('/', (req, res) => {
 
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const validSorts = ['date', 'due_date', 'number', 'total', 'created_at'];
+  // payment_status is computed in JS from is_paid/verified_paid/tech_marked_paid/
+  // due_date. Express the same logic in SQL so it sorts as: paid < verified_paid <
+  // tech_marked_paid < overdue < unpaid (matches the typical display order).
+  const paymentStatusExpr = `
+    CASE
+      WHEN is_paid = 1 THEN 0
+      WHEN verified_paid = 1 THEN 1
+      WHEN tech_marked_paid = 1 THEN 2
+      WHEN due_date IS NOT NULL AND due_date != '' AND date(due_date) < date('now') THEN 3
+      ELSE 4
+    END
+  `;
+
+  // Map each whitelisted sort key to its SQL expression. The `total` column is
+  // stored as TEXT — CAST it to REAL so it sorts numerically (e.g. 9 < 200 < 1000).
+  const sortExprs = {
+    date: 'date',
+    due_date: 'due_date',
+    number: 'number',
+    total: 'CAST(total AS REAL)',
+    created_at: 'created_at',
+    customer_business_then_name: 'COALESCE(customer_business_then_name, \'\')',
+    payment_status: `(${paymentStatusExpr})`,
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'date';
   const safeDir = sortDir === 'asc' ? 'ASC' : 'DESC';
 
@@ -97,7 +121,7 @@ router.get('/', (req, res) => {
   const invoices = db.prepare(`
     SELECT id, number, customer_id, customer_business_then_name, date, due_date, total, is_paid, verified_paid, tech_marked_paid, raw_json, synced
     FROM invoices ${whereStr}
-    ORDER BY ${safeSort} ${safeDir}
+    ORDER BY ${sortExprs[safeSort]} ${safeDir}, id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

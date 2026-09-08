@@ -27,7 +27,18 @@ router.get('/', (req, res) => {
   }
 
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-  const validSorts = ['created_at', 'name', 'asset_type', 'updated_at'];
+  // Map each whitelisted sort key to its SQL expression. `properties` is a JSON
+  // blob containing Make/Model — pull them out with json_extract so the "Make /
+  // Model" header sorts alphabetically by Make (with Model as tie-breaker).
+  const sortExprs = {
+    created_at: 'a.created_at',
+    updated_at: 'a.updated_at',
+    name: 'a.name',
+    asset_type: 'a.asset_type',
+    asset_serial: 'COALESCE(a.asset_serial, \'\')',
+    properties: "COALESCE(json_extract(a.properties, '$.Make'), '') || ' ' || COALESCE(json_extract(a.properties, '$.Model'), '')",
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'created_at';
   const safeDir = sortDir === 'asc' ? 'ASC' : 'DESC';
 
@@ -37,7 +48,7 @@ router.get('/', (req, res) => {
            a.created_at, a.updated_at, a.asset_type, a.properties, a.synced,
            a.policy_folder_id
     FROM assets a ${whereStr}
-    ORDER BY a.${safeSort} ${safeDir}
+    ORDER BY ${sortExprs[safeSort]} ${safeDir}, a.id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

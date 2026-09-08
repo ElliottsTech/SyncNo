@@ -525,3 +525,36 @@ export async function generatePdf(type, id) {
     await browser.close().catch(() => {});
   }
 }
+
+/**
+ * Fill a template with a sample record's data and return the rendered HTML —
+ * used by the settings-page "Preview" tab. Sample IDs are picked from the DB
+ * (first non-empty record with line items / comments).
+ */
+export async function previewTemplate(type, templateHtml) {
+  const builder = ENTITY_BUILDERS[type];
+  if (!builder) throw new Error(`Unknown PDF type: ${type}`);
+
+  const db = getDb();
+  const id = pickSampleId(type, db);
+  if (!id) throw new Error(`No sample ${type} record found in the database — sync data first`);
+  const entity = builder.load(id);
+  if (!entity) throw new Error(`Sample ${type} (id=${id}) not found`);
+  const replacements = builder.build(entity);
+  return fillTemplate(templateHtml, replacements);
+}
+
+function pickSampleId(type, db) {
+  const tables = {
+    invoice:        { sql: "SELECT id FROM invoices WHERE raw_json LIKE '%line_items%' LIMIT 1",          type: 'invoices' },
+    estimate:       { sql: "SELECT id FROM estimates WHERE raw_json LIKE '%line_items%' LIMIT 1",         type: 'estimates' },
+    purchase_order: { sql: "SELECT id FROM purchase_orders WHERE (raw_json LIKE '%vendor%' OR vendor LIKE '%name%') LIMIT 1", type: 'purchase_orders' },
+    ticket:         { sql: "SELECT id FROM tickets WHERE raw_json LIKE '%comments%' LIMIT 1",             type: 'tickets' },
+  };
+  const spec = tables[type];
+  if (!spec) return null;
+  try {
+    const row = db.prepare(spec.sql).get();
+    return row ? String(row.id) : null;
+  } catch { return null; }
+}

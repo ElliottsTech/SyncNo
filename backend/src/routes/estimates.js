@@ -39,7 +39,17 @@ router.get('/', (req, res) => {
   if (filter_total) { conditions.push('CAST(e.total AS TEXT) LIKE ?'); params.push(`%${filter_total}%`); }
 
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-  const validSorts = ['date', 'number', 'status', 'total', 'created_at'];
+  // Map each whitelisted sort key to its SQL expression. `total` is stored as
+  // TEXT — CAST it to REAL for numeric ordering.
+  const sortExprs = {
+    date: 'e.date',
+    number: 'e.number',
+    status: 'e.status',
+    total: 'CAST(e.total AS REAL)',
+    created_at: 'e.created_at',
+    customer_business_then_name: "COALESCE(e.customer_business_then_name, '')",
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'date';
   const safeDir = sortDir === 'asc' ? 'ASC' : 'DESC';
 
@@ -48,7 +58,7 @@ router.get('/', (req, res) => {
     SELECT e.id, e.number, e.status, e.date, e.subtotal, e.total, e.tax,
            e.customer_id, e.customer_business_then_name, e.raw_json, e.synced
     FROM estimates e ${whereStr}
-    ORDER BY e.${safeSort} ${safeDir}
+    ORDER BY ${sortExprs[safeSort]} ${safeDir}, e.id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

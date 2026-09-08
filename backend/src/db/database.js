@@ -94,6 +94,41 @@ export function initDb() {
     try { db.exec(alt); } catch (e) { /* column may already exist */ }
   }
 
+  // Migrate purchase_orders table: QBO attachment sync (matches a Syncro PO to
+  // its QuickBooks counterpart by number, then pulls file attachments from QBO).
+  const alterPurchaseOrders = [
+    'ALTER TABLE purchase_orders ADD COLUMN qbo_id TEXT',
+    'ALTER TABLE purchase_orders ADD COLUMN attachments_count INTEGER DEFAULT 0',
+    'ALTER TABLE purchase_orders ADD COLUMN attachments_synced_at TEXT',
+  ];
+  for (const alt of alterPurchaseOrders) {
+    try { db.exec(alt); } catch (e) { /* column may already exist */ }
+  }
+
+  // Reconcile stale sync_state rows on startup. A backend restart wipes the
+  // in-memory AbortController for any running sync but leaves sync_state
+  // with phase = 'running'/'detail' etc. Without this, the frontend's resume
+  // useEffect sees the stale phase and greys out the start button forever.
+  //
+  // We only touch rows whose updated_at is older than 60 seconds (so we
+  // don't clobber a run that just started milliseconds before boot). The
+  // detail_cursor / detail_total / detail_synced checkpoints are preserved
+  // so a subsequent run can resume where the orphaned one left off.
+  try {
+    const cutoff = new Date(Date.now() - 60_000).toISOString().replace('T', ' ').replace('Z', '');
+    const result = db.prepare(`
+      UPDATE sync_state
+      SET phase = 'idle',
+          updated_at = datetime('now')
+      WHERE phase NOT IN ('idle', 'error')
+        AND (updated_at IS NULL OR updated_at < ?)
+    `).run(cutoff);
+    if (result.changes > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[initDb] Reconciled ${result.changes} stale sync_state row(s) on startup`);
+    }
+  } catch (_) { /* sync_state may not exist yet on first-ever boot */ }
+
   return db;
 }
 

@@ -49,7 +49,19 @@ router.get('/', (req, res) => {
 
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const validSorts = ['name', 'price_retail', 'price_cost', 'quantity', 'product_category', 'updated_at'];
+  // Map each whitelisted sort key to its SQL expression. Money/qty columns are
+  // stored as TEXT — CAST them to REAL for numeric ordering.
+  const sortExprs = {
+    name: 'name',
+    product_category: 'product_category',
+    updated_at: 'updated_at',
+    price_retail: 'CAST(price_retail AS REAL)',
+    price_cost: 'CAST(price_cost AS REAL)',
+    quantity: 'CAST(quantity AS REAL)',
+    serialized: 'serialized',
+    disabled: 'disabled',
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'name';
   const safeDir = sortDir === 'desc' ? 'DESC' : 'ASC';
 
@@ -59,7 +71,7 @@ router.get('/', (req, res) => {
            product_category, upc_code, serialized, disabled, taxable, since_updated_at,
            updated_at, synced, deleted_at
     FROM products ${whereStr}
-    ORDER BY ${safeSort} ${safeDir}
+    ORDER BY ${sortExprs[safeSort]} ${safeDir}, id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

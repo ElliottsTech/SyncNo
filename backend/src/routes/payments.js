@@ -47,7 +47,20 @@ router.get('/', (req, res) => {
 
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const validSorts = ['applied_at', 'payment_amount', 'payment_method', 'created_at', 'updated_at'];
+  // Map each whitelisted sort key to its SQL expression. payment_amount is
+  // stored as TEXT — CAST it to REAL for numeric ordering. `customer` is a JSON
+  // blob; pull the name out so the Customer column sorts alphabetically.
+  const sortExprs = {
+    applied_at: 'applied_at',
+    payment_amount: 'CAST(payment_amount AS REAL)',
+    payment_method: 'payment_method',
+    created_at: 'created_at',
+    updated_at: 'updated_at',
+    ref_num: 'ref_num',
+    success: 'success',
+    customer: "COALESCE(json_extract(customer, '$.business_name'), json_extract(customer, '$.business_then_name'), json_extract(customer, '$.fullname'), '')",
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'applied_at';
   const safeDir = sortDir === 'asc' ? 'ASC' : 'DESC';
 
@@ -56,7 +69,7 @@ router.get('/', (req, res) => {
     SELECT id, created_at, updated_at, success, payment_amount, invoice_ids, ref_num,
            applied_at, payment_method, customer_id, customer, synced
     FROM payments ${whereStr}
-    ORDER BY ${safeSort} ${safeDir}
+    ORDER BY ${sortExprs[safeSort]} ${safeDir}, id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

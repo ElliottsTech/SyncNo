@@ -37,7 +37,19 @@ router.get('/', (req, res) => {
   }
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const validSorts = ['name', 'status', 'next_date', 'start_date', 'end_date', 'created_at', 'updated_at'];
+  // amount is stored as TEXT — CAST to REAL for numeric ordering.
+  const sortExprs = {
+    name: 'name',
+    status: 'status',
+    amount: 'CAST(amount AS REAL)',
+    frequency: 'COALESCE(frequency, \'\')',
+    next_date: 'next_date',
+    start_date: 'start_date',
+    end_date: 'end_date',
+    created_at: 'created_at',
+    updated_at: 'updated_at',
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'next_date';
   const safeDir = sortDir === 'asc' ? 'ASC' : 'DESC';
 
@@ -46,7 +58,7 @@ router.get('/', (req, res) => {
     SELECT id, invoice_id, customer_id, name, status, amount, next_date,
            start_date, end_date, frequency, created_at, updated_at, synced
     FROM schedules ${whereStr}
-    ORDER BY ${safeSort} ${safeDir}
+    ORDER BY ${sortExprs[safeSort]} ${safeDir}, id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

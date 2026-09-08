@@ -37,7 +37,16 @@ router.get('/', (req, res) => {
   }
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const validSorts = ['start_at', 'end_at', 'summary', 'created_at', 'updated_at'];
+  const sortExprs = {
+    start_at: 'start_at',
+    end_at: 'end_at',
+    summary: 'summary',
+    created_at: 'created_at',
+    updated_at: 'updated_at',
+    location: 'COALESCE(location, \'\')',
+    all_day: 'all_day',
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'start_at';
   const safeDir = sortDir === 'asc' ? 'ASC' : 'DESC';
 
@@ -46,7 +55,7 @@ router.get('/', (req, res) => {
     SELECT id, summary, customer_id, ticket_id, start_at, end_at, duration,
            location, appointment_location_type, all_day, created_at, updated_at, synced
     FROM appointments ${whereStr}
-    ORDER BY ${safeSort} ${safeDir}
+    ORDER BY ${sortExprs[safeSort]} ${safeDir}, id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

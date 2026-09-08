@@ -32,7 +32,14 @@ router.get('/', (req, res) => {
   }
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const validSorts = ['email', 'disabled', 'created_at', 'updated_at'];
+  const sortExprs = {
+    email: 'email',
+    disabled: 'disabled',
+    created_at: 'created_at',
+    updated_at: 'updated_at',
+    mobile: 'COALESCE(mobile, \'\')',
+  };
+  const validSorts = Object.keys(sortExprs);
   const safeSort = validSorts.includes(sortCol) ? sortCol : 'email';
   const safeDir = sortDir === 'desc' ? 'DESC' : 'ASC';
 
@@ -40,7 +47,7 @@ router.get('/', (req, res) => {
   const rows = db.prepare(`
     SELECT id, email, disabled, customer_id, contact_id, mobile, created_at, updated_at, synced
     FROM portal_users ${whereStr}
-    ORDER BY ${safeSort} ${safeDir}
+    ORDER BY ${sortExprs[safeSort]} ${safeDir}, id ASC
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 

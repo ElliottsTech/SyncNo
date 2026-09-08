@@ -25,6 +25,9 @@ import schedulesRouter from './routes/schedules.js';
 import syncroUsersRouter from './routes/syncro_users.js';
 import wikiPagesRouter from './routes/wiki_pages.js';
 import syncRouter from './routes/sync.js';
+import syncWebSessionRouter from './routes/sync_web_session.js';
+import qboSettingsRouter from './routes/qbo_settings.js';
+import qboAttachmentsRouter from './routes/qbo_attachments.js';
 import systemRouter from './routes/system.js';
 import backupSettingsRouter from './routes/backup_settings.js';
 import mcpSettingsRouter from './routes/mcp_settings.js';
@@ -62,7 +65,7 @@ app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json());
 
 // Public paths that skip auth entirely.
-const PUBLIC_PATHS = ['/api/health', '/api/auth/'];
+const PUBLIC_PATHS = ['/api/health', '/api/auth/', '/api/qbo-settings/callback'];
 
 // Authenticate every request via either:
 //   (a) NextAuth session cookie (browser, forwarded through the Next.js rewrite), or
@@ -136,7 +139,11 @@ app.use('/api/portal_users', portalUsersRouter);
 app.use('/api/schedules', schedulesRouter);
 app.use('/api/syncro_users', syncroUsersRouter);
 app.use('/api/wiki_pages', wikiPagesRouter);
+// More specific mount first: /api/sync would otherwise shadow /api/sync/web-session.
+app.use('/api/sync/web-session', syncWebSessionRouter);
 app.use('/api/sync', syncRouter);
+app.use('/api/qbo-settings', qboSettingsRouter);
+app.use('/api/qbo-attachments', qboAttachmentsRouter);
 app.use('/api/system', systemRouter);
 app.use('/api/backup-settings', backupSettingsRouter);
 app.use('/api/mcp-settings', mcpSettingsRouter);

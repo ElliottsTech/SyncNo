@@ -234,6 +234,34 @@ export default function SyncroPage() {
   const [previewing, setPreviewing] = useState(false);
   const [previewResult, setPreviewResult] = useState<any>(null);
 
+  // Serial → PO link job (standalone, not part of the entity grid).
+  const [linkingPos, setLinkingPos] = useState(false);
+  const [linkPosProgress, setLinkPosProgress] = useState<string | null>(null);
+  type LinkStats = { current?: number; total?: number; linked?: number; noPo?: number; errors?: number; remaining?: number; etaMs?: number | null; elapsedMs?: number };
+  const [linkPosStats, setLinkPosStats] = useState<LinkStats | null>(null);
+  const [linkPosResult, setLinkPosResult] = useState<{ ok: boolean; message?: string; error?: string; count?: number } | null>(null);
+  const [linkPosForceAll, setLinkPosForceAll] = useState(false);
+  const [webSessionConfigured, setWebSessionConfigured] = useState<boolean | null>(null);
+  const linkPosXhrRef = useRef<XMLHttpRequest | null>(null);
+  const linkPosPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // PO Attachments sync job (Syncro web-cookie scrape, standalone).
+  const [syncingPoAtts, setSyncingPoAtts] = useState(false);
+  const [poAttProgress, setPoAttProgress] = useState<string | null>(null);
+  const [poAttStats, setPoAttStats] = useState<LinkStats | null>(null);
+  const [poAttResult, setPoAttResult] = useState<{ ok: boolean; message?: string; error?: string; count?: number } | null>(null);
+  const [poAttForceAll, setPoAttForceAll] = useState(false);
+  const poAttXhrRef = useRef<XMLHttpRequest | null>(null);
+  const poAttPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // QBO attachment sync (standalone, not part of the entity grid).
+  const [qboSyncing, setQboSyncing] = useState(false);
+  type QboSyncStats = { current?: number; total?: number; currentRecordName?: string | null; matched?: number; downloaded?: number; skipped?: number; errors?: string[] };
+  const [qboSyncStats, setQboSyncStats] = useState<QboSyncStats | null>(null);
+  const [qboSyncResult, setQboSyncResult] = useState<{ ok: boolean; message?: string; error?: string } | null>(null);
+  const [qboConnected, setQboConnected] = useState<boolean | null>(null);
+  const qboSyncXhrRef = useRef<XMLHttpRequest | null>(null);
+
   // Multiple active syncs — each has its own XHR and terminal
   const [activeSyncs, setActiveSyncs] = useState<Record<string, ActiveSync>>({});
   // Last completed sync — kept so terminal can be reopened to replay events
@@ -342,6 +370,102 @@ export default function SyncroPage() {
       });
   }, []);
 
+  // Check whether the Syncro web-session cookie is configured (gates the
+  // serial→PO link job button).
+  useEffect(() => {
+    fetch(`${API}/sync/web-session`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setWebSessionConfigured(!!d.configured); })
+      .catch(() => {});
+  }, []);
+
+  // Check whether QuickBooks Online is connected (gates the QBO attachment
+  // sync button).
+  useEffect(() => {
+    fetch(`${API}/qbo-settings`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setQboConnected(!!d.connected); })
+      .catch(() => {});
+  }, []);
+
+  // If the serial→PO link job is already running on the backend (e.g. page was
+  // refreshed mid-run), resume showing its progress via polling.
+  useEffect(() => {
+    fetch(`${API}/sync/progress`)
+      .then(r => r.json())
+      .then(d => {
+        const st = d['serial_po_links'];
+        if (st && st.phase && st.phase !== 'idle' && st.phase !== 'error') {
+          setLinkingPos(true);
+          setLinkPosStats({ current: st.detail_synced, total: st.detail_total });
+          setLinkPosProgress(`Resumed — ${st.detail_synced}/${st.detail_total}`);
+          // Start polling for live updates.
+          if (!linkPosPollRef.current) {
+            linkPosPollRef.current = setInterval(() => {
+              fetch(`${API}/sync/progress`)
+                .then(r => r.json())
+                .then(d2 => {
+                  const s2 = d2['serial_po_links'];
+                  if (!s2) return;
+                  if (s2.phase === 'idle' || s2.phase === 'error') {
+                    if (linkPosPollRef.current) { clearInterval(linkPosPollRef.current); linkPosPollRef.current = null; }
+                    setLinkingPos(false);
+                    setLinkPosProgress(null);
+                    if (s2.phase === 'error' && s2.last_result_error) {
+                      setLinkPosResult({ ok: false, error: s2.last_result_error });
+                    } else {
+                      setLinkPosResult({ ok: true, message: `Linked ${s2.last_result_count || 0} serials to POs`, count: s2.last_result_count });
+                    }
+                  } else {
+                    setLinkPosStats({ current: s2.detail_synced, total: s2.detail_total });
+                  }
+                })
+                .catch(() => {});
+            }, 3000);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // If the PO attachments sync job is already running, resume showing progress.
+  useEffect(() => {
+    fetch(`${API}/sync/progress`)
+      .then(r => r.json())
+      .then(d => {
+        const st = d['po_attachments_syncro'];
+        if (st && st.phase && st.phase !== 'idle' && st.phase !== 'error') {
+          setSyncingPoAtts(true);
+          setPoAttStats({ current: st.detail_synced, total: st.detail_total });
+          setPoAttProgress(`Resumed — ${st.detail_synced}/${st.detail_total}`);
+          if (!poAttPollRef.current) {
+            poAttPollRef.current = setInterval(() => {
+              fetch(`${API}/sync/progress`)
+                .then(r => r.json())
+                .then(d2 => {
+                  const s2 = d2['po_attachments_syncro'];
+                  if (!s2) return;
+                  if (s2.phase === 'idle' || s2.phase === 'error') {
+                    if (poAttPollRef.current) { clearInterval(poAttPollRef.current); poAttPollRef.current = null; }
+                    setSyncingPoAtts(false);
+                    setPoAttProgress(null);
+                    if (s2.phase === 'error' && s2.last_result_error) {
+                      setPoAttResult({ ok: false, error: s2.last_result_error });
+                    } else {
+                      setPoAttResult({ ok: true, message: `Downloaded ${s2.last_result_count || 0} attachments`, count: s2.last_result_count });
+                    }
+                  } else {
+                    setPoAttStats({ current: s2.detail_synced, total: s2.detail_total });
+                  }
+                })
+                .catch(() => {});
+            }, 3000);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   function buildProgressFromState(phase: Phase, state: any): PhaseProgress {
     if (!state || state.phase === 'idle' || state.phase === 'error') return null;
     const p: PhaseProgress = { phase: phase as Phase, status: 'started' };
@@ -444,6 +568,328 @@ export default function SyncroPage() {
       setPreviewResult({ error: e.message });
     }
     setPreviewing(false);
+  }
+
+  // Serial → PO link job — streams progress via XHR+SSE (same pattern as
+  // handleSyncEntity, but a standalone action, not an entity-grid sync).
+  function handleLinkPos() {
+    if (linkingPos) return;
+    setLinkingPos(true);
+    setLinkPosResult(null);
+    setLinkPosStats(null);
+    setLinkPosProgress('Starting…');
+
+    const xhr = new XMLHttpRequest();
+    linkPosXhrRef.current = xhr;
+    const url = `${API}/sync/link-serial-pos${linkPosForceAll ? '?forceAll=true' : ''}`;
+    xhr.open('POST', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+
+    // Helper to apply the structured stats fields from any event.
+    const applyStats = (data: any) => {
+      if (data.current != null || data.total != null || data.linked != null || data.etaMs != null) {
+        setLinkPosStats({
+          current: data.current, total: data.total,
+          linked: data.linked, noPo: data.noPo, errors: data.errors,
+          remaining: data.remaining, etaMs: data.etaMs, elapsedMs: data.elapsedMs,
+        });
+      }
+    };
+
+    let buffer = '';
+    xhr.onprogress = () => {
+      buffer += xhr.responseText.slice(buffer.length);
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            // Filter: only process THIS job's events. The backend fans out all
+            // SSE events to all connected clients, so without this filter the
+            // two jobs' stats would cross-contaminate when run simultaneously.
+            if (data.phase && data.phase !== 'serial_po_links') continue;
+            applyStats(data);
+            if (data.message) setLinkPosProgress(data.message);
+            if (data.status === 'done') {
+              setLinkPosResult({ ok: true, message: data.message, count: data.count });
+            } else if (data.status === 'cancelled') {
+              setLinkPosResult({ ok: true, message: data.message || 'Cancelled — progress saved. Re-run to resume.' });
+            } else if (data.status === 'error') {
+              setLinkPosResult({ ok: false, error: data.error, message: data.message, count: data.count });
+            }
+          } catch (_) {}
+        }
+      }
+    };
+
+    // Polling fallback: if the page is refreshed mid-run, the SSE stream is lost.
+    // Poll /progress to keep the stats live until the job finishes.
+    const startPolling = () => {
+      if (linkPosPollRef.current) return;
+      linkPosPollRef.current = setInterval(() => {
+        fetch(`${API}/sync/progress`)
+          .then(r => r.json())
+          .then(d => {
+            const st = d['serial_po_links'];
+            if (!st) return;
+            if (st.phase === 'idle' || st.phase === 'error') {
+              // Job ended (completed or errored) — stop polling.
+              if (linkPosPollRef.current) { clearInterval(linkPosPollRef.current); linkPosPollRef.current = null; }
+              if (!linkingPos) return;
+              setLinkingPos(false);
+              if (st.phase === 'error' && st.last_result_error && !linkPosResult) {
+                setLinkPosResult({ ok: false, error: st.last_result_error });
+              } else if (!linkPosResult) {
+                setLinkPosResult({ ok: true, message: `Linked ${st.last_result_count || 0} serials to POs`, count: st.last_result_count });
+              }
+            } else {
+              setLinkPosStats(prev => ({
+                ...prev,
+                current: st.detail_synced ?? prev?.current,
+                total: st.detail_total ?? prev?.total,
+              }));
+            }
+          })
+          .catch(() => {});
+      }, 3000);
+    };
+
+    xhr.onload = () => {
+      setLinkingPos(false);
+      linkPosXhrRef.current = null;
+      if (linkPosPollRef.current) { clearInterval(linkPosPollRef.current); linkPosPollRef.current = null; }
+      // Refresh web-session status in case the cookie expired during the run.
+      fetch(`${API}/sync/web-session`).then(r => r.ok ? r.json() : null).then(d => { if (d) setWebSessionConfigured(!!d.configured); }).catch(() => {});
+    };
+    xhr.onerror = () => {
+      setLinkingPos(false);
+      linkPosXhrRef.current = null;
+      if (linkPosPollRef.current) { clearInterval(linkPosPollRef.current); linkPosPollRef.current = null; }
+      if (!linkPosResult) setLinkPosResult({ ok: false, error: 'Network error' });
+    };
+    xhr.send(JSON.stringify({}));
+    startPolling();
+  }
+
+  function cancelLinkPos() {
+    const xhr = linkPosXhrRef.current;
+    if (xhr) {
+      try { xhr.abort(); } catch (_) {}
+      linkPosXhrRef.current = null;
+    }
+    if (linkPosPollRef.current) { clearInterval(linkPosPollRef.current); linkPosPollRef.current = null; }
+    // Optimistically clear local state so the UI responds immediately, then
+    // verify the backend actually dropped to idle. The backend DELETE handler
+    // always reconciles DB state (even if no live runner exists), so this
+    // fetch should normally succeed and confirm cancellation.
+    setLinkingPos(false);
+    setLinkPosProgress(null);
+    setLinkPosResult(prev => prev ? prev : { ok: true, message: 'Cancelled — progress saved. Re-run to resume.' });
+    fetch(`${API}/sync/link-serial-pos`, { method: 'DELETE' })
+      .then(async r => {
+        const body = await r.json().catch(() => ({}));
+        // Re-read /progress to confirm backend state matches our local UI.
+        // If the backend still reports running (shouldn't happen now that the
+        // DELETE always reconciles), surface that to the user instead of
+        // silently leaving the button greyed out.
+        return fetch(`${API}/sync/progress`).then(r2 => r2.json()).then(d => {
+          const st = d['serial_po_links'];
+          if (st && st.phase && st.phase !== 'idle' && st.phase !== 'error') {
+            setLinkPosResult({ ok: false, error: 'Backend still reports running — try refreshing the page' });
+          } else if (body && body.cancelled === false) {
+            // No live runner to cancel (e.g. backend was restarted); the job
+            // simply wasn't running on the server anymore.
+            setLinkPosResult(prev => prev && prev.error === 'Cancelled' ? prev : { ok: false, error: 'Job was no longer running on the server' });
+          }
+        });
+      })
+      .catch(() => { /* network error — optimistic state already cleared */ });
+  }
+
+  // PO Attachments sync (Syncro web-cookie scrape) — same XHR+SSE pattern.
+  function handleSyncPoAtts() {
+    if (syncingPoAtts) return;
+    setSyncingPoAtts(true);
+    setPoAttResult(null);
+    setPoAttStats(null);
+    setPoAttProgress('Starting…');
+
+    const xhr = new XMLHttpRequest();
+    poAttXhrRef.current = xhr;
+    const url = `${API}/sync/sync-po-attachments${poAttForceAll ? '?forceAll=true' : ''}`;
+    xhr.open('POST', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+
+    const applyStats = (data: any) => {
+      if (data.current != null || data.total != null || data.downloaded != null || data.etaMs != null) {
+        setPoAttStats({
+          current: data.current, total: data.total,
+          linked: data.downloaded, noPo: data.skipped, errors: data.errors,
+          remaining: data.remaining, etaMs: data.etaMs, elapsedMs: data.elapsedMs,
+        });
+      }
+    };
+
+    let buffer = '';
+    xhr.onprogress = () => {
+      buffer += xhr.responseText.slice(buffer.length);
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            // Filter: only process THIS job's events (see handleLinkPos for why).
+            if (data.phase && data.phase !== 'po_attachments_syncro') continue;
+            applyStats(data);
+            if (data.message) setPoAttProgress(data.message);
+            if (data.status === 'done') {
+              setPoAttResult({ ok: true, message: data.message, count: data.count });
+            } else if (data.status === 'cancelled') {
+              setPoAttResult({ ok: true, message: data.message || 'Cancelled — progress saved. Re-run to resume.' });
+            } else if (data.status === 'error') {
+              setPoAttResult({ ok: false, error: data.error, message: data.message, count: data.count });
+            }
+          } catch (_) {}
+        }
+      }
+    };
+
+    const startPolling = () => {
+      if (poAttPollRef.current) return;
+      poAttPollRef.current = setInterval(() => {
+        fetch(`${API}/sync/progress`)
+          .then(r => r.json())
+          .then(d => {
+            const st = d['po_attachments_syncro'];
+            if (!st) return;
+            if (st.phase === 'idle' || st.phase === 'error') {
+              if (poAttPollRef.current) { clearInterval(poAttPollRef.current); poAttPollRef.current = null; }
+              if (!syncingPoAtts) return;
+              setSyncingPoAtts(false);
+              if (st.phase === 'error' && st.last_result_error && !poAttResult) {
+                setPoAttResult({ ok: false, error: st.last_result_error });
+              } else if (!poAttResult) {
+                setPoAttResult({ ok: true, message: `Downloaded ${st.last_result_count || 0} attachments`, count: st.last_result_count });
+              }
+            } else {
+              setPoAttStats(prev => ({ ...prev, current: st.detail_synced ?? prev?.current, total: st.detail_total ?? prev?.total }));
+            }
+          })
+          .catch(() => {});
+      }, 3000);
+    };
+
+    xhr.onload = () => {
+      setSyncingPoAtts(false);
+      poAttXhrRef.current = null;
+      if (poAttPollRef.current) { clearInterval(poAttPollRef.current); poAttPollRef.current = null; }
+    };
+    xhr.onerror = () => {
+      setSyncingPoAtts(false);
+      poAttXhrRef.current = null;
+      if (poAttPollRef.current) { clearInterval(poAttPollRef.current); poAttPollRef.current = null; }
+      if (!poAttResult) setPoAttResult({ ok: false, error: 'Network error' });
+    };
+    xhr.send(JSON.stringify({}));
+    startPolling();
+  }
+
+  function cancelSyncPoAtts() {
+    const xhr = poAttXhrRef.current;
+    if (xhr) {
+      try { xhr.abort(); } catch (_) {}
+      poAttXhrRef.current = null;
+    }
+    if (poAttPollRef.current) { clearInterval(poAttPollRef.current); poAttPollRef.current = null; }
+    // Optimistic local clear; verify with backend below.
+    setSyncingPoAtts(false);
+    setPoAttProgress(null);
+    setPoAttResult(prev => prev ? prev : { ok: true, message: 'Cancelled — progress saved. Re-run to resume.' });
+    fetch(`${API}/sync/sync-po-attachments`, { method: 'DELETE' })
+      .then(async r => {
+        const body = await r.json().catch(() => ({}));
+        return fetch(`${API}/sync/progress`).then(r2 => r2.json()).then(d => {
+          const st = d['po_attachments_syncro'];
+          if (st && st.phase && st.phase !== 'idle' && st.phase !== 'error') {
+            setPoAttResult({ ok: false, error: 'Backend still reports running — try refreshing the page' });
+          } else if (body && body.cancelled === false) {
+            setPoAttResult(prev => prev && prev.error === 'Cancelled' ? prev : { ok: false, error: 'Job was no longer running on the server' });
+          }
+        });
+      })
+      .catch(() => {});
+  }
+
+  // QBO attachment sync — streams progress via XHR+SSE (same pattern as
+  // handleLinkPos). Pulls file attachments from QuickBooks Online POs.
+  function handleQboSync() {
+    if (qboSyncing) return;
+    setQboSyncing(true);
+    setQboSyncResult(null);
+    setQboSyncStats(null);
+
+    const xhr = new XMLHttpRequest();
+    qboSyncXhrRef.current = xhr;
+    xhr.open('POST', `${API}/qbo-attachments/sync`, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+
+    let buffer = '';
+    xhr.onprogress = () => {
+      buffer += xhr.responseText.slice(buffer.length);
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.status === 'progress') {
+              setQboSyncStats({
+                current: data.current, total: data.total,
+                currentRecordName: data.currentRecordName,
+                matched: data.matched, downloaded: data.downloaded,
+                skipped: data.skipped, errors: data.errors,
+              });
+            } else if (data.status === 'done') {
+              setQboSyncStats({
+                matched: data.matched, downloaded: data.downloaded,
+                skipped: data.skipped, errors: data.errors,
+                total: data.total,
+              });
+              setQboSyncResult({
+                ok: true,
+                message: `${data.downloaded || 0} downloaded, ${data.skipped || 0} skipped across ${data.matched || 0} matched POs`,
+              });
+            } else if (data.status === 'error') {
+              setQboSyncResult({ ok: false, error: data.error });
+            }
+            // 'complete' is the terminal marker — no action needed beyond what
+            // 'done'/'error' already set.
+          } catch (_) {}
+        }
+      }
+    };
+    xhr.onload = () => {
+      setQboSyncing(false);
+      qboSyncXhrRef.current = null;
+    };
+    xhr.onerror = () => {
+      setQboSyncing(false);
+      qboSyncXhrRef.current = null;
+      if (!qboSyncResult) setQboSyncResult({ ok: false, error: 'Network error' });
+    };
+    xhr.send(JSON.stringify({}));
+  }
+
+  function cancelQboSync() {
+    const xhr = qboSyncXhrRef.current;
+    if (xhr) {
+      try { xhr.abort(); } catch (_) {}
+      qboSyncXhrRef.current = null;
+    }
+    setQboSyncing(false);
+    setQboSyncResult(prev => prev ? prev : { ok: false, error: 'Cancelled' });
   }
 
   function cancelSync(key: string) {
@@ -1250,6 +1696,248 @@ export default function SyncroPage() {
                   )}
                 </div>
               )}
+
+              {/* Serial → PO link job */}
+              <div className="border-t pt-4 mt-4">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button
+                    onClick={handleLinkPos}
+                    disabled={linkingPos || !webSessionConfigured || anySyncing}
+                    className="bg-gray-100 border text-gray-700 px-4 py-2 rounded text-sm hover:bg-gray-200 disabled:opacity-50"
+                    title={!webSessionConfigured ? 'Configure the Syncro Web Session cookie first (Config → Syncro Web Session)' : ''}
+                  >
+                    {linkingPos ? 'Linking…' : 'Link Serials to POs'}
+                  </button>
+                  {linkingPos && (
+                    <button
+                      onClick={cancelLinkPos}
+                      className="text-red-500 hover:text-red-700 text-sm font-medium"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                    <input
+                      type="checkbox"
+                      checked={linkPosForceAll}
+                      onChange={e => setLinkPosForceAll(e.target.checked)}
+                      disabled={linkingPos}
+                    />
+                    Re-link all (overwrite existing)
+                  </label>
+                </div>
+                <p className="text-xs text-gray-500 mt-1.5">
+                  Resolves the PO each serial was received on via the Syncro web session and saves it permanently to the DB. Only serials not yet linked are processed (unless &ldquo;Re-link all&rdquo;).{' '}
+                  {!webSessionConfigured && (
+                    <a href="/settings/config" className="text-blue-600 hover:underline">Configure the cookie first →</a>
+                  )}
+                </p>
+
+                {linkingPos && linkPosStats && (() => {
+                  const pct = linkPosStats.total && linkPosStats.total > 0
+                    ? Math.min(100, Math.round(((linkPosStats.current || 0) / linkPosStats.total) * 100))
+                    : 0;
+                  const fmtEta = (ms: number | null | undefined) => {
+                    if (ms == null || ms <= 0) return '—';
+                    const s = Math.round(ms / 1000);
+                    if (s < 60) return `${s}s`;
+                    const m = Math.floor(s / 60);
+                    const rs = s % 60;
+                    if (m < 60) return `${m}m ${rs}s`;
+                    const h = Math.floor(m / 60);
+                    const rm = m % 60;
+                    return `${h}h ${rm}m`;
+                  };
+                  return (
+                    <div className="mt-2 space-y-1.5">
+                      {/* Progress bar */}
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 bg-gray-200 rounded-full h-2 overflow-hidden">
+                          <div className="bg-blue-600 h-2 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="text-xs font-mono text-gray-700 shrink-0">{pct}%</span>
+                      </div>
+                      {/* Stats line */}
+                      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-gray-600 font-mono">
+                        <span><span className="text-gray-400">Processed:</span> {linkPosStats.current || 0} / {linkPosStats.total || 0}</span>
+                        <span className="text-green-700"><span className="text-gray-400">Linked:</span> {linkPosStats.linked ?? 0}</span>
+                        <span className="text-gray-500"><span className="text-gray-400">No PO:</span> {linkPosStats.noPo ?? 0}</span>
+                        {linkPosStats.errors ? <span className="text-red-600"><span className="text-gray-400">Errors:</span> {linkPosStats.errors}</span> : null}
+                        <span><span className="text-gray-400">ETA:</span> {fmtEta(linkPosStats.etaMs)}</span>
+                      </div>
+                      {linkPosProgress && (
+                        <p className="text-xs text-gray-500 font-mono truncate">{linkPosProgress}</p>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {linkingPos && !linkPosStats && linkPosProgress && (
+                  <p className="text-xs text-gray-700 mt-2 font-mono">{linkPosProgress}</p>
+                )}
+
+                {linkPosResult && (
+                  <div className={`mt-2 border rounded p-2.5 text-sm ${
+                    linkPosResult.ok ? 'bg-green-50 border-green-300 text-green-900'
+                                   : 'bg-red-50 border-red-300 text-red-900'
+                  }`}>
+                    <span className="font-medium">{linkPosResult.ok ? 'Done' : 'Failed'}</span>
+                    {linkPosResult.message ? ` — ${linkPosResult.message}` : ''}
+                    {linkPosResult.error ? ` — ${linkPosResult.error}` : ''}
+                  </div>
+                )}
+              </div>
+
+              {/* Syncro PO Attachments sync job */}
+              <div className="border-t pt-4 mt-4">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button
+                    onClick={handleSyncPoAtts}
+                    disabled={syncingPoAtts || !webSessionConfigured || anySyncing}
+                    className="bg-gray-100 border text-gray-700 px-4 py-2 rounded text-sm hover:bg-gray-200 disabled:opacity-50"
+                    title={!webSessionConfigured ? 'Configure the Syncro Web Session cookie first (Config → Syncro Web Session)' : ''}
+                  >
+                    {syncingPoAtts ? 'Syncing…' : 'Sync PO Attachments (Syncro)'}
+                  </button>
+                  {syncingPoAtts && (
+                    <button
+                      onClick={cancelSyncPoAtts}
+                      className="text-red-500 hover:text-red-700 text-sm font-medium"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                    <input
+                      type="checkbox"
+                      checked={poAttForceAll}
+                      onChange={e => setPoAttForceAll(e.target.checked)}
+                      disabled={syncingPoAtts}
+                    />
+                    Re-sync all (overwrite existing)
+                  </label>
+                </div>
+                <p className="text-xs text-gray-500 mt-1.5">
+                  Downloads attachments from Syncro&rsquo;s web PO pages (via the session cookie) to local disk. Only POs not yet synced are processed (unless &ldquo;Re-sync all&rdquo;).{' '}
+                  {!webSessionConfigured && (
+                    <a href="/settings/config" className="text-blue-600 hover:underline">Configure the cookie first →</a>
+                  )}
+                </p>
+
+                {syncingPoAtts && poAttStats && (() => {
+                  const pct = poAttStats.total && poAttStats.total > 0
+                    ? Math.min(100, Math.round(((poAttStats.current || 0) / poAttStats.total) * 100))
+                    : 0;
+                  const fmtEta = (ms: number | null | undefined) => {
+                    if (ms == null || ms <= 0) return '—';
+                    const s = Math.round(ms / 1000);
+                    if (s < 60) return `${s}s`;
+                    const m = Math.floor(s / 60);
+                    const rs = s % 60;
+                    if (m < 60) return `${m}m ${rs}s`;
+                    const h = Math.floor(m / 60);
+                    const rm = m % 60;
+                    return `${h}h ${rm}m`;
+                  };
+                  return (
+                    <div className="mt-2 space-y-1.5">
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 bg-gray-200 rounded-full h-2 overflow-hidden">
+                          <div className="bg-blue-600 h-2 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="text-xs font-mono text-gray-700 shrink-0">{pct}%</span>
+                      </div>
+                      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-gray-600 font-mono">
+                        <span><span className="text-gray-400">POs:</span> {poAttStats.current || 0} / {poAttStats.total || 0}</span>
+                        <span className="text-green-700"><span className="text-gray-400">Downloaded:</span> {poAttStats.linked ?? 0}</span>
+                        <span className="text-gray-500"><span className="text-gray-400">Skipped:</span> {poAttStats.noPo ?? 0}</span>
+                        {poAttStats.errors ? <span className="text-red-600"><span className="text-gray-400">Errors:</span> {poAttStats.errors}</span> : null}
+                        <span><span className="text-gray-400">ETA:</span> {fmtEta(poAttStats.etaMs)}</span>
+                      </div>
+                      {poAttProgress && (
+                        <p className="text-xs text-gray-500 font-mono truncate">{poAttProgress}</p>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {syncingPoAtts && !poAttStats && poAttProgress && (
+                  <p className="text-xs text-gray-700 mt-2 font-mono">{poAttProgress}</p>
+                )}
+
+                {poAttResult && (
+                  <div className={`mt-2 border rounded p-2.5 text-sm ${
+                    poAttResult.ok ? 'bg-green-50 border-green-300 text-green-900'
+                                 : 'bg-red-50 border-red-300 text-red-900'
+                  }`}>
+                    <span className="font-medium">{poAttResult.ok ? 'Done' : 'Failed'}</span>
+                    {poAttResult.message ? ` — ${poAttResult.message}` : ''}
+                    {poAttResult.error ? ` — ${poAttResult.error}` : ''}
+                  </div>
+                )}
+              </div>
+
+              {/* QuickBooks Online PO attachments */}
+              <div className="border-t pt-4 mt-4">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button
+                    onClick={handleQboSync}
+                    disabled={qboSyncing || !qboConnected}
+                    className="bg-gray-100 border text-gray-700 px-4 py-2 rounded text-sm hover:bg-gray-200 disabled:opacity-50"
+                    title={!qboConnected ? 'Connect QuickBooks Online first (Config → QuickBooks Online)' : ''}
+                  >
+                    {qboSyncing ? 'Syncing…' : 'Sync PO Attachments (QBO)'}
+                  </button>
+                  {qboSyncing && (
+                    <button
+                      onClick={cancelQboSync}
+                      className="text-red-500 hover:text-red-700 text-sm font-medium"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 mt-1.5">
+                  Pulls file attachments from matching QuickBooks Online purchase orders (matched by PO number).
+                  {!qboConnected && (
+                    <> <a href="/settings/config" className="text-blue-600 hover:underline">Connect QuickBooks Online first →</a></>
+                  )}
+                </p>
+
+                {qboSyncing && qboSyncStats && (qboSyncStats.total != null) && (() => {
+                  const pct = qboSyncStats.total && qboSyncStats.total > 0
+                    ? Math.min(100, Math.round(((qboSyncStats.current || 0) / qboSyncStats.total) * 100))
+                    : 0;
+                  return (
+                    <div className="mt-2 space-y-1.5">
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 bg-gray-200 rounded-full h-2 overflow-hidden">
+                          <div className="bg-blue-600 h-2 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="text-xs font-mono text-gray-700 shrink-0">{pct}%</span>
+                      </div>
+                      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-gray-600 font-mono">
+                        <span><span className="text-gray-400">PO:</span> {qboSyncStats.current || 0} / {qboSyncStats.total || 0}{qboSyncStats.currentRecordName ? ` — ${qboSyncStats.currentRecordName}` : ''}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {qboSyncing && !qboSyncStats && (
+                  <p className="text-xs text-gray-700 mt-2 font-mono">Starting…</p>
+                )}
+
+                {qboSyncResult && (
+                  <div className={`mt-2 border rounded p-2.5 text-sm ${
+                    qboSyncResult.ok ? 'bg-green-50 border-green-300 text-green-900'
+                                   : 'bg-red-50 border-red-300 text-red-900'
+                  }`}>
+                    <span className="font-medium">{qboSyncResult.ok ? 'Done' : 'Failed'}</span>
+                    {qboSyncResult.message ? ` — ${qboSyncResult.message}` : ''}
+                    {qboSyncResult.error ? ` — ${qboSyncResult.error}` : ''}
+                  </div>
+                )}
+              </div>
             </div>
           </CollapsibleSection>
         )}
