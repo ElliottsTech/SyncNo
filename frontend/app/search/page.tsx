@@ -10,6 +10,7 @@ const API = '/api';
 // Keep keys in sync with backend ALL_TYPES (routes/search.js).
 const TYPE_META: Record<string, { label: string; href: (r: any) => string; badge: string }> = {
   customer:      { label: 'Customers',       href: r => `/customers/${r.id}`,                    badge: 'bg-blue-100 text-blue-800' },
+  contact:       { label: 'Contacts',        href: r => r.customer_id ? `/customers/${r.customer_id}?tab=contacts` : '#', badge: 'bg-sky-100 text-sky-800' },
   ticket:        { label: 'Tickets',         href: r => `/tickets/${r.id}`,                      badge: 'bg-green-100 text-green-800' },
   ticket_comment:{ label: 'Ticket Comments', href: r => `/tickets/${r.id}`,                      badge: 'bg-emerald-100 text-emerald-800' },
   invoice:       { label: 'Invoices',        href: r => `/invoices/${r.id}`,                     badge: 'bg-rose-100 text-rose-800' },
@@ -152,7 +153,7 @@ export default function SearchPage() {
       <div className="flex gap-2 mb-4 max-w-3xl">
         <input
           type="text"
-          placeholder="Search customers, tickets, comments, vendors, serials..."
+          placeholder="Search customers, contacts, tickets, comments, vendors, serials..."
           value={query}
           onChange={e => setQuery(e.target.value)}
           className="border px-4 py-2 rounded flex-1"

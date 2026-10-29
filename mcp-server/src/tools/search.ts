@@ -1,7 +1,7 @@
 /**
  * Cross-entity search tool — the front door for discovery.
  *
- * Wraps `GET /api/search?q=<term>&type=<csv>`, which searches 14 entity types
+ * Wraps `GET /api/search?q=<term>&type=<csv>`, which searches 15 entity types
  * at once and returns normalized rows: { id, type, title, subtitle, status,
  * date, customer, ...rawFields }. The LLM should reach for this first when
  * looking something up by name/number/email, then use the get_<entity> /
@@ -16,6 +16,7 @@ import { errorResult } from './entities.js';
 // Must mirror ALL_TYPES in backend/src/routes/search.js.
 const SEARCH_TYPES = [
   'customer',
+  'contact',
   'ticket',
   'ticket_comment',
   'invoice',
@@ -36,7 +37,7 @@ export function registerSearchTool(server: McpServer): void {
     'search',
     {
       description:
-        'Cross-entity search across customers, tickets, ticket comments, invoices, products, vendors, serials, appointments, contracts, leads, portal users, syncro users, wiki pages, and schedules. Use this FIRST to find records by name, number, email, or any text. Returns normalized hits: { id, type, title, subtitle, status, date, customer }. Then call get_<type> or a relationship tool to drill in.',
+        'Cross-entity search across customers, contacts, tickets, ticket comments, invoices, products, vendors, serials, appointments, contracts, leads, portal users, syncro users, wiki pages, and schedules. Use this FIRST to find records by name, number, email, or any text. Returns normalized hits: { id, type, title, subtitle, status, date, customer }. Then call get_<type> or a relationship tool to drill in.',
       inputSchema: {
         q: z
           .string()

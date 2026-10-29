@@ -6,6 +6,7 @@ const router = Router();
 // All searchable entity types, in display order.
 const ALL_TYPES = [
   'customer',
+  'contact',
   'ticket',
   'ticket_comment',
   'invoice',
@@ -70,6 +71,26 @@ router.get('/', (req, res) => {
         customer: name,
       };
     }));
+  }
+
+  // Search customer contacts. Link jumps to the parent customer's contacts tab.
+  if (wants('contact')) {
+    const contacts = db.prepare(`
+      SELECT ct.id, ct.name, ct.email, ct.phone, ct.mobile, ct.customer_id, 'contact' AS type,
+             ${CUSTOMER_NAME_EXPR} AS customer_name
+      FROM contacts ct
+      LEFT JOIN customers c ON c.id = ct.customer_id
+      WHERE ct.name LIKE ? OR ct.email LIKE ? OR ct.phone LIKE ? OR ct.mobile LIKE ?
+      LIMIT 25
+    `).all(searchTerm, searchTerm, searchTerm, searchTerm);
+    results.push(...contacts.map(ct => ({
+      ...ct,
+      title: ct.name || ct.email || `(contact #${ct.id})`,
+      subtitle: [ct.email, ct.phone, ct.mobile].filter(Boolean).join(' · '),
+      status: null,
+      date: null,
+      customer: ct.customer_name || null,
+    })));
   }
 
   // Search tickets
