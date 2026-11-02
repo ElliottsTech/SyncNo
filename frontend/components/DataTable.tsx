@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-interface Column {
+export interface Column {
   key: string;
   label: string;
   render?: (value: any, row: any) => React.ReactNode;

@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import DataTable from '../../components/DataTable';
+import DataTable, { type Column } from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
@@ -85,7 +85,7 @@ export default function InvoicesPage() {
     return { total, outstanding, overdue, paid };
   }, [invoices]);
 
-  const columns = [
+  const columns: Column[] = [
     {
       key: 'number',
       label: '#',
