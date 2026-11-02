@@ -7,6 +7,10 @@ interface Column {
   render?: (value: any, row: any) => React.ReactNode;
   sortable?: boolean;
   filterable?: boolean;
+  // Column filter input type. 'text' (default) = single substring input;
+  // 'dateRange' = two date inputs (from/to) emitted as `${key}_from` / `${key}_to`
+  // — meant for server-side filtering (the values are range bounds, not substrings).
+  filter?: 'text' | 'dateRange';
 }
 
 interface DataTableProps {
@@ -61,6 +65,26 @@ export default function DataTable({
 
   const handleFilterChange = useCallback((colKey: string, value: string) => {
     const newFilters = { ...filters, [colKey]: value };
+    setFilters(newFilters);
+
+    if (serverSide && onFilterChange) {
+      if (filterTimerRef.current) clearTimeout(filterTimerRef.current);
+      filterTimerRef.current = setTimeout(() => {
+        onFilterChange(newFilters);
+      }, 300);
+    }
+  }, [filters, serverSide, onFilterChange]);
+
+  // Update one bound of a dateRange filter, clearing its sibling when both
+  // bounds are empty so the column stops filtering entirely.
+  const handleRangeChange = useCallback((colKey: string, bound: 'from' | 'to', value: string) => {
+    const fromKey = `${colKey}_from`;
+    const toKey = `${colKey}_to`;
+    const newFilters = { ...filters, [bound === 'from' ? fromKey : toKey]: value };
+    if (!newFilters[fromKey] && !newFilters[toKey]) {
+      delete newFilters[fromKey];
+      delete newFilters[toKey];
+    }
     setFilters(newFilters);
 
     if (serverSide && onFilterChange) {
@@ -138,7 +162,24 @@ export default function DataTable({
                     </svg>
                   </button>
                 </div>
-                {showFilter[col.key] && (
+                {showFilter[col.key] && col.filter === 'dateRange' ? (
+                  <div className="mt-1 flex gap-1" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="date"
+                      title={`${col.label} from`}
+                      value={filters[`${col.key}_from`] || ''}
+                      onChange={(e) => handleRangeChange(col.key, 'from', e.target.value)}
+                      className="w-1/2 text-xs border rounded px-1 py-1"
+                    />
+                    <input
+                      type="date"
+                      title={`${col.label} to`}
+                      value={filters[`${col.key}_to`] || ''}
+                      onChange={(e) => handleRangeChange(col.key, 'to', e.target.value)}
+                      className="w-1/2 text-xs border rounded px-1 py-1"
+                    />
+                  </div>
+                ) : showFilter[col.key] && (
                   <input
                     ref={(el) => { filterRefs.current[col.key] = el; }}
                     type="text"

@@ -102,11 +102,13 @@ export default function InvoicesPage() {
     {
       key: 'date',
       label: 'Date',
+      filter: 'dateRange',
       render: (v: string) => <span title={fmtDate(v)} className="text-gray-600">{fmtDate(v)}</span>,
     },
     {
       key: 'due_date',
       label: 'Due',
+      filter: 'dateRange',
       render: (v: string, row: any) => {
         if (!v) return <span className="text-gray-400">—</span>;
         const overdue = row.payment_status === 'overdue';

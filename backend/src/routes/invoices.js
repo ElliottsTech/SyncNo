@@ -60,7 +60,8 @@ function getPaymentStatus(invoice) {
 router.get('/', (req, res) => {
   const db = getDb();
   const { page = 1, limit = 50, sortCol = 'date', sortDir = 'desc',
-          filter_number, filter_name, filter_customer_business_then_name, filter_date, filter_due_date, filter_total, filter_payment_status } = req.query;
+          filter_number, filter_name, filter_customer_business_then_name, filter_date, filter_date_from, filter_date_to,
+          filter_due_date, filter_due_date_from, filter_due_date_to, filter_total, filter_payment_status } = req.query;
   const offset = (page - 1) * limit;
 
   const conditions = [];
@@ -85,6 +86,25 @@ router.get('/', (req, res) => {
   if (filter_due_date) {
     conditions.push('due_date LIKE ?');
     params.push(`%${filter_due_date}%`);
+  }
+  // Date-range filters (YYYY-MM-DD bounds, inclusive). date() normalizes values
+  // that carry time components ("2024-03-15T10:00:00Z") so the bounds compare
+  // correctly; NULL/empty dates fall out of the comparison automatically.
+  if (filter_date_from) {
+    conditions.push('date(date) >= date(?)');
+    params.push(String(filter_date_from));
+  }
+  if (filter_date_to) {
+    conditions.push('date(date) <= date(?)');
+    params.push(String(filter_date_to));
+  }
+  if (filter_due_date_from) {
+    conditions.push('date(due_date) >= date(?)');
+    params.push(String(filter_due_date_from));
+  }
+  if (filter_due_date_to) {
+    conditions.push('date(due_date) <= date(?)');
+    params.push(String(filter_due_date_to));
   }
   if (filter_total) {
     conditions.push('total LIKE ?');
