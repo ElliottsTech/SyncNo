@@ -90,6 +90,18 @@ router.get('/', (req, res) => {
     conditions.push('total LIKE ?');
     params.push(`%${filter_total}%`);
   }
+  if (filter_payment_status) {
+    // payment_status is computed, not stored — reproduce the same precedence as
+    // getPaymentStatus() in SQL so the column filter matches what's displayed.
+    conditions.push(`LOWER(CASE
+      WHEN is_paid = 1 THEN 'paid'
+      WHEN verified_paid = 1 THEN 'verified_paid'
+      WHEN tech_marked_paid = 1 THEN 'tech_marked_paid'
+      WHEN due_date IS NOT NULL AND due_date != '' AND date(due_date) < date('now') THEN 'overdue'
+      ELSE 'unpaid'
+    END) LIKE ?`);
+    params.push(`%${String(filter_payment_status).toLowerCase()}%`);
+  }
 
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
