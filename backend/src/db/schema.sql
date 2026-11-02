@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS invoices (
   customer_id INTEGER,
   customer_business_then_name TEXT,
   number TEXT,
+  name TEXT,
   created_at TEXT,
   updated_at TEXT,
   date TEXT,

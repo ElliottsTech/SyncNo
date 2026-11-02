@@ -93,6 +93,11 @@ export default function InvoicesPage() {
         <Link href={`/invoices/${row.id}`} className="text-blue-600 hover:underline font-medium">{v}</Link>
       ),
     },
+    {
+      key: 'name',
+      label: 'Name',
+      render: (v: string) => v ? <span title={v} className="text-gray-700">{v}</span> : <span className="text-gray-400">—</span>,
+    },
     { key: 'customer_business_then_name', label: 'Customer' },
     {
       key: 'date',

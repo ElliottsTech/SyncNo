@@ -105,6 +105,15 @@ export function initDb() {
     try { db.exec(alt); } catch (e) { /* column may already exist */ }
   }
 
+  // Migrate invoices table: surface the Syncro invoice "name" (a short label
+  // on the invoice JSON) as a real column so the list can filter/sort on it.
+  try {
+    db.exec('ALTER TABLE invoices ADD COLUMN name TEXT');
+    // Backfill from raw_json for rows synced before the column existed.
+    db.exec(`UPDATE invoices SET name = json_extract(raw_json, '$.name')
+             WHERE (name IS NULL OR name = '') AND raw_json IS NOT NULL AND json_valid(raw_json)`);
+  } catch (e) { /* column may already exist */ }
+
   // Reconcile stale sync_state rows on startup. A backend restart wipes the
   // in-memory AbortController for any running sync but leaves sync_state
   // with phase = 'running'/'detail' etc. Without this, the frontend's resume

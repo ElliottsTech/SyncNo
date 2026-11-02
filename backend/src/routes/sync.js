@@ -1981,12 +1981,12 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
               const detailData = await fetchJson(`${baseUrl}/invoices/${inv.id}`, 'invoices');
               const detail = detailData.invoice || detailData;
               db.prepare(`
-                INSERT OR REPLACE INTO invoices (id, customer_id, customer_business_then_name, number, created_at, updated_at, date, due_date, subtotal, total, tax, verified_paid, tech_marked_paid, ticket_id, pdf_url, is_paid, location_id, po_number, contact_id, note, hardwarecost, user_id, raw_json, synced)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                INSERT OR REPLACE INTO invoices (id, customer_id, customer_business_then_name, number, name, created_at, updated_at, date, due_date, subtotal, total, tax, verified_paid, tech_marked_paid, ticket_id, pdf_url, is_paid, location_id, po_number, contact_id, note, hardwarecost, user_id, raw_json, synced)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
               `).run(
                 detail.id, detail.customer_id || detail.customer?.id || null,
                 detail.customer_business_then_name || detail.customer?.business_name || detail.customer?.fullname || '',
-                String(detail.number || ''), detail.created_at || '', detail.updated_at || '',
+                String(detail.number || ''), detail.name || '', detail.created_at || '', detail.updated_at || '',
                 detail.date || '', detail.due_date || '', detail.subtotal || '', detail.total || '', detail.tax || '',
                 detail.verified_paid ? 1 : 0, detail.tech_marked_paid ? 1 : 0,
                 detail.ticket_id ? String(Number(detail.ticket_id)) : '', detail.pdf_url || '',

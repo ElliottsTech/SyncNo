@@ -60,7 +60,7 @@ function getPaymentStatus(invoice) {
 router.get('/', (req, res) => {
   const db = getDb();
   const { page = 1, limit = 50, sortCol = 'date', sortDir = 'desc',
-          filter_number, filter_customer_business_then_name, filter_date, filter_due_date, filter_total, filter_payment_status } = req.query;
+          filter_number, filter_name, filter_customer_business_then_name, filter_date, filter_due_date, filter_total, filter_payment_status } = req.query;
   const offset = (page - 1) * limit;
 
   const conditions = [];
@@ -69,6 +69,10 @@ router.get('/', (req, res) => {
   if (filter_number) {
     conditions.push('number LIKE ?');
     params.push(`%${filter_number}%`);
+  }
+  if (filter_name) {
+    conditions.push('name LIKE ?');
+    params.push(`%${filter_name}%`);
   }
   if (filter_customer_business_then_name) {
     conditions.push('customer_business_then_name LIKE ?');
@@ -108,6 +112,7 @@ router.get('/', (req, res) => {
     date: 'date',
     due_date: 'due_date',
     number: 'number',
+    name: 'COALESCE(name, \'\')',
     total: 'CAST(total AS REAL)',
     created_at: 'created_at',
     customer_business_then_name: 'COALESCE(customer_business_then_name, \'\')',
@@ -119,7 +124,7 @@ router.get('/', (req, res) => {
 
   const countRow = db.prepare(`SELECT COUNT(*) as total FROM invoices ${whereStr}`).get(...params);
   const invoices = db.prepare(`
-    SELECT id, number, customer_id, customer_business_then_name, date, due_date, total, is_paid, verified_paid, tech_marked_paid, raw_json, synced
+    SELECT id, number, name, customer_id, customer_business_then_name, date, due_date, total, is_paid, verified_paid, tech_marked_paid, raw_json, synced
     FROM invoices ${whereStr}
     ORDER BY ${sortExprs[safeSort]} ${safeDir}, id ASC
     LIMIT ? OFFSET ?
