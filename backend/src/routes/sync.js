@@ -134,6 +134,14 @@ try {
 // Each running sync gets its own so cancelling one doesn't kill the others.
 const syncAbort = new Map();
 
+// Sync IDs with a live runner in this process. A sync_state phase of
+// running/detail with no entry here is an orphaned checkpoint (crash/restart
+// mid-sync) — it would 409 every future trigger forever, so /trigger resets it.
+const liveSyncs = new Set();
+
+// Canonical entity list — single source of truth for trigger + reset.
+const ALL_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
+
 // ─── Global rate-limit throttle ──────────────────────────────────────────────
 // Syncro API limit is global (~150 req/min). All concurrent sync runs share it.
 // Enforce a minimum interval between outgoing requests across ALL syncs to stay
@@ -583,7 +591,6 @@ router.post('/trigger', requireAdmin, async (req, res) => {
   rateLimitHits = 0;
 
   // Check if this entity is already running
-  const ALL_ENTITIES = ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'payments', 'product_serials', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
   const enabled = getEnabledEntities();
   const entitiesToRun = (entity && entity !== 'all' ? [entity] : ALL_ENTITIES)
     .filter(e => enabled.includes(e));
@@ -595,11 +602,20 @@ router.post('/trigger', requireAdmin, async (req, res) => {
   for (const ent of entitiesToRun) {
     const state = getSyncState(ent);
     if (state.phase !== 'idle' && state.phase !== 'error') {
-      return res.status(409).json({
-        error: `Sync for ${ent} already in progress`,
-        entity: ent,
-        phase: state.phase,
-      });
+      // A non-idle phase with no live runner is an orphaned checkpoint (e.g. a
+      // crash mid-detail). It must not block syncs forever — reset it to idle,
+      // preserving the detail resume checkpoints exactly like /reset does.
+      if (!liveSyncs.has(syncId) && !liveSyncs.has(ent)) {
+        state.phase = 'idle';
+        state.last_result_error = null;
+        saveSyncState(state);
+      } else {
+        return res.status(409).json({
+          error: `Sync for ${ent} already in progress`,
+          entity: ent,
+          phase: state.phase,
+        });
+      }
     }
   }
 
@@ -826,6 +842,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 async function runFakeSync(entitiesToRun, forceAll, res, syncId) {
   const db = getDb();
   const startedAt = Date.now();
+  liveSyncs.add(syncId);
   const abort = getSyncAbortController(syncId);
   const aborted = () => abort.signal.aborted;
 
@@ -935,6 +952,7 @@ async function runFakeSync(entitiesToRun, forceAll, res, syncId) {
   // Drop this response from liveClients
   const idx = liveClients.indexOf(res);
   if (idx >= 0) liveClients.splice(idx, 1);
+  liveSyncs.delete(syncId);
   console.log(`[DEMO] runFakeSync complete entities=[${entitiesToRun.join(',')}]`);
 }
 
@@ -946,6 +964,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
   const db = getDb();
   const results = {};
   const startTime = Date.now();
+  liveSyncs.add(syncId);
   const abortCtrl = getSyncAbortController(syncId);
   const syncSignal = abortCtrl.signal;
 
@@ -1086,10 +1105,13 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
   }
 
   // Sleep that respects abort signal. Resolves normally on timeout, rejects on abort.
+  // The listener is removed on settle — { once: true } alone only fires on abort,
+  // so normal completions would otherwise leak listeners on the shared signal.
   function sleepAbortable(ms) {
     return new Promise((resolve, reject) => {
-      const t = setTimeout(resolve, ms);
-      syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
+      const onAbort = () => { clearTimeout(t); reject(syncSignal.reason); };
+      const t = setTimeout(() => { syncSignal.removeEventListener('abort', onAbort); resolve(); }, ms);
+      syncSignal.addEventListener('abort', onAbort, { once: true });
     });
   }
 
@@ -1721,7 +1743,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
       saveSyncState(state);
 
       for (let page = 1; page <= totalPages; page++) {
-        const data = page === 1 ? page1 : await fetchJson(`${baseUrl}/customers?page=${page}&per_page=100}`, 'customers');
+        const data = page === 1 ? page1 : await fetchJson(`${baseUrl}/customers?page=${page}&per_page=100`, 'customers');
         checkAbort();
         const customers = data.customers || [];
 
@@ -1773,10 +1795,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           state.detail_item_index = absoluteIndex;
           saveSyncState(state);
           emitEvent( { phase: 'customers', status: 'progress', current: absoluteIndex, total, currentRecordId: c.id, currentRecordName: c.business_name || c.fullname }, res);
-          await new Promise((resolve, reject) => {
-            const t = setTimeout(resolve, 350);
-            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+          await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
         }
 
         if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
@@ -1882,10 +1901,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           state.detail_item_index = absoluteIndex;
           saveSyncState(state);
           emitEvent( { phase: 'contacts', status: 'progress', current: absoluteIndex, total, currentRecordId: c.id, currentRecordName: c.name }, res);
-          await new Promise((resolve, reject) => {
-            const t = setTimeout(resolve, 350);
-            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+          await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
         }
 
         if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
@@ -1991,10 +2007,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           state.detail_item_index = absoluteIndex;
           saveSyncState(state);
           emitEvent( { phase: 'invoices', status: 'progress', current: absoluteIndex, total, currentRecordId: inv.id, currentRecordName: inv.number }, res);
-          await new Promise((resolve, reject) => {
-            const t = setTimeout(resolve, 350);
-            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+          await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
         }
 
         if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
@@ -2098,10 +2111,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           state.detail_item_index = absoluteIndex;
           saveSyncState(state);
           emitEvent( { phase: 'assets', status: 'progress', current: absoluteIndex, total, currentRecordId: a.id, currentRecordName: a.name }, res);
-          await new Promise((resolve, reject) => {
-            const t = setTimeout(resolve, 350);
-            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+          await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
         }
 
         if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
@@ -2207,10 +2217,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           state.detail_item_index = absoluteIndex;
           saveSyncState(state);
           emitEvent( { phase: 'estimates', status: 'progress', current: absoluteIndex, total, currentRecordId: e.id, currentRecordName: e.number }, res);
-          await new Promise((resolve, reject) => {
-            const t = setTimeout(resolve, 350);
-            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+          await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
         }
 
         if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
@@ -2316,10 +2323,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           state.detail_item_index = absoluteIndex;
           saveSyncState(state);
           emitEvent( { phase: 'purchase_orders', status: 'progress', current: absoluteIndex, total, currentRecordId: p.id, currentRecordName: p.number }, res);
-          await new Promise((resolve, reject) => {
-            const t = setTimeout(resolve, 350);
-            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+          await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
         }
 
         if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
@@ -2421,10 +2425,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           state.detail_item_index = absoluteIndex;
           saveSyncState(state);
           emitEvent( { phase: 'vendors', status: 'progress', current: absoluteIndex, total, currentRecordId: v.id, currentRecordName: v.name }, res);
-          await new Promise((resolve, reject) => {
-            const t = setTimeout(resolve, 350);
-            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+          await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
         }
 
         if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
@@ -2528,10 +2529,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           state.detail_item_index = absoluteIndex;
           saveSyncState(state);
           emitEvent({ phase: 'payments', status: 'progress', current: absoluteIndex, total, currentRecordId: p.id, currentRecordName: p.ref_num || '' }, res);
-          await new Promise((resolve, reject) => {
-            const t = setTimeout(resolve, 350);
-            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+          await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
         }
 
         if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
@@ -2646,10 +2644,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           state.detail_item_index = absoluteIndex;
           saveSyncState(state);
           emitEvent({ phase: 'products', status: 'progress', current: absoluteIndex, total, currentRecordId: p.id, currentRecordName: p.name }, res);
-          await new Promise((resolve, reject) => {
-            const t = setTimeout(resolve, 350);
-            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+          await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
         }
 
         if (data.meta?.total_pages > totalPages) totalPages = data.meta.total_pages;
@@ -2799,10 +2794,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     };
 
     // Throttle between products (same as original).
-    const throttle = () => new Promise((resolve, reject) => {
-      const t = setTimeout(resolve, 350);
-      syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-    }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+    const throttle = () => sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
 
     try {
       // ── Phase 1: catalog / discovery ──────────────────────────────────────
@@ -3033,10 +3025,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
         }, res);
 
         // Abort-aware inter-row delay (matches syncProductSerials).
-        await new Promise((resolve, reject) => {
-          const t = setTimeout(resolve, 350);
-          syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-        }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+        await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
       }
 
       // Done — clear cursor so the next run starts fresh (unless re-linked).
@@ -3237,10 +3226,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           ...attStats(),
         }, res);
 
-        await new Promise((resolve, reject) => {
-          const t = setTimeout(resolve, 350);
-          syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-        }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+        await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
       }
 
       state.phase = 'idle';
@@ -3331,10 +3317,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
       if (processed % 50 === 0 || processed === all.length) {
         emitEvent({ phase: 'products', status: 'progress', subphase: 'skus', current: processed, total: all.length, message: `skus ${processed}/${all.length}` }, res);
       }
-      await new Promise((resolve, reject) => {
-        const t = setTimeout(resolve, 350);
-        syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-      }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+      await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
     }
     log('SYNC_ENTITY', `Product SKUs: iterated ${all.length} products, ${totalSkus} SKUs upserted`);
   }
@@ -3437,10 +3420,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
             currentRecordId: r[idField],
             currentRecordName: r[nameField] || r.email || r.summary || '',
           }, res);
-          await new Promise((resolve, reject) => {
-            const t = setTimeout(resolve, 350);
-            syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-          }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+          await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
         }
 
         if (paginateUntilEmpty) {
@@ -3685,10 +3665,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
               currentRecordName: r.name || custLabel,
               subphase: 'folder',
             }, res);
-            await new Promise((resolve, reject) => {
-              const t = setTimeout(resolve, 350);
-              syncSignal.addEventListener('abort', () => { clearTimeout(t); reject(syncSignal.reason); }, { once: true });
-            }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+            await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
           }
 
           if (records.length === 0 || page >= totalPages) break;
@@ -3857,10 +3834,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
           current: absoluteIndex, total: tickets.length,
           current_ticket_id: t.id, current_ticket_number: t.number,
         }, res);
-        await new Promise((resolve, reject) => {
-          const t2 = setTimeout(resolve, 350);
-          syncSignal.addEventListener('abort', () => { clearTimeout(t2); reject(syncSignal.reason); }, { once: true });
-        }).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
+        await sleepAbortable(350).catch(e => { if (syncSignal.aborted) throw new Error('Sync cancelled'); });
       }
 
       results.worksheet_results = absoluteIndex;
@@ -3931,6 +3905,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     // (called via setImmediate) and becomes an unhandled rejection that kills the process.
   } finally {
     syncAbort.delete(syncId);
+    liveSyncs.delete(syncId);
   }
 }
 
@@ -3975,7 +3950,10 @@ router.delete('/trigger', requireAdmin, (req, res) => {
 router.post('/reset', requireAdmin, (req, res) => {
   if (isDemo()) return demoNoop(req, res);
   const { entity } = req.body;
-  const entities = entity ? [entity] : ['customers', 'contacts', 'tickets', 'invoices', 'assets', 'estimates', 'purchase_orders', 'vendors', 'products', 'appointments', 'contracts', 'leads', 'policy_folders', 'portal_users', 'schedules', 'syncro_users', 'wiki_pages', 'worksheet_results'];
+  if (entity && !ALL_ENTITIES.includes(entity)) {
+    return res.status(400).json({ error: `Unknown entity: ${entity}` });
+  }
+  const entities = entity ? [entity] : ALL_ENTITIES;
   for (const ent of entities) {
     const state = getSyncState(ent);
     state.phase = 'idle';
