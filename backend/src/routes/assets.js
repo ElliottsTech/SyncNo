@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getDb } from '../db/database.js';
+import { addDateRange } from '../lib/dateRangeFilter.js';
 
 const router = Router();
 
@@ -25,6 +26,9 @@ router.get('/', (req, res) => {
     conditions.push('asset_serial LIKE ?');
     params.push(`%${filter_asset_serial}%`);
   }
+
+  addDateRange(conditions, params, req.query, 'created_at');
+  addDateRange(conditions, params, req.query, 'updated_at');
 
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   // Map each whitelisted sort key to its SQL expression. `properties` is a JSON

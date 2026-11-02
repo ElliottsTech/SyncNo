@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import DataTable from '../../components/DataTable';
+import DataTable, { type Column } from '../../components/DataTable';
 import Pagination from '../../components/Pagination';
 import AppointmentCalendar from '../../components/AppointmentCalendar';
 import { useListState } from '../../lib/useUrlState';
@@ -52,7 +52,7 @@ export default function AppointmentsPage() {
     else fetchAllForCalendar();
   }, [view, fetchList, fetchAllForCalendar]);
 
-  const columns = [
+  const columns: Column[] = [
     {
       key: 'summary',
       label: 'Summary',
@@ -63,14 +63,14 @@ export default function AppointmentsPage() {
       ),
     },
     {
-      key: 'start_at',
+      key: 'start_at', filter: 'dateRange',
       label: 'Start',
       render: v => v ? new Date(v).toLocaleString() : '—',
     },
-    { key: 'end_at', label: 'End', render: v => v ? new Date(v).toLocaleString() : '—' },
+    { key: 'end_at', filter: 'dateRange', label: 'End', render: v => v ? new Date(v).toLocaleString() : '—' },
     { key: 'location', label: 'Location' },
     { key: 'all_day', label: 'All Day', render: v => v ? 'Yes' : 'No' },
-    { key: 'created_at', label: 'Created', render: v => v ? new Date(v).toLocaleDateString() : '' },
+    { key: 'created_at', filter: 'dateRange', label: 'Created', render: v => v ? new Date(v).toLocaleDateString() : '' },
   ];
 
   return (

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getDb } from '../db/database.js';
+import { addDateRange } from '../lib/dateRangeFilter.js';
 
 const router = Router();
 
@@ -35,6 +36,9 @@ router.get('/', (req, res) => {
     conditions.push('customer_id = ?');
     params.push(Number(filter_customer_id));
   }
+  addDateRange(conditions, params, req.query, 'next_date');
+  addDateRange(conditions, params, req.query, 'end_date');
+
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
   // amount is stored as TEXT — CAST to REAL for numeric ordering.

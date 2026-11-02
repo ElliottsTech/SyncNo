@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import DataTable from '../../components/DataTable';
+import DataTable, { type Column } from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
@@ -85,7 +85,7 @@ export default function PurchaseOrdersPage() {
     return { totalValue, open, overdue, received };
   }, [pos]);
 
-  const columns = [
+  const columns: Column[] = [
     {
       key: 'number', label: 'PO #',
       render: (v: string, row: any) => (
@@ -115,11 +115,11 @@ export default function PurchaseOrdersPage() {
       render: (v: any) => <span className="font-medium">{fmtMoney(v)}</span>,
     },
     {
-      key: 'created_at', label: 'Created',
+      key: 'created_at', filter: 'dateRange', label: 'Created',
       render: (v: string) => <span title={fmtDate(v)} className="text-gray-600">{relTime(v)}</span>,
     },
     {
-      key: 'due_date', label: 'Due',
+      key: 'due_date', filter: 'dateRange', label: 'Due',
       render: (v: string, row: any) => {
         if (!v) return <span className="text-gray-400">—</span>;
         const isOverdue = !/received|complete|closed|delivered|cancelled/i.test(row.status || '')

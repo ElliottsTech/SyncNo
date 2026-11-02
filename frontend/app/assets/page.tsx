@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import DataTable from '../../components/DataTable';
+import DataTable, { type Column } from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
@@ -84,7 +84,7 @@ export default function AssetsPage() {
     };
   }, [assets]);
 
-  const columns = [
+  const columns: Column[] = [
     {
       key: 'name', label: 'Name',
       render: (v: string, row: any) => (
@@ -114,11 +114,11 @@ export default function AssetsPage() {
       },
     },
     {
-      key: 'created_at', label: 'Created',
+      key: 'created_at', filter: 'dateRange', label: 'Created',
       render: (v: string) => <span title={fmtDate(v)} className="text-gray-600">{fmtDate(v)}</span>,
     },
     {
-      key: 'updated_at', label: 'Updated',
+      key: 'updated_at', filter: 'dateRange', label: 'Updated',
       render: (v: string) => <span title={fmtDate(v)} className="text-gray-600">{relTime(v)}</span>,
     },
   ];

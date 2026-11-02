@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getDb } from '../db/database.js';
+import { addDateRange } from '../lib/dateRangeFilter.js';
 
 const router = Router();
 
@@ -41,6 +42,8 @@ router.get('/', (req, res) => {
     conditions.push('ticket_subject LIKE ?');
     params.push(`%${filter_ticket_subject}%`);
   }
+  addDateRange(conditions, params, req.query, 'created_at');
+
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
   const sortExprs = {

@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import DataTable from '../../components/DataTable';
+import DataTable, { type Column } from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
@@ -70,7 +70,7 @@ export default function EstimatesPage() {
     return { totalValue, accepted, pending, invoiced };
   }, [estimates]);
 
-  const columns = [
+  const columns: Column[] = [
     {
       key: 'number', label: '#',
       render: (v: string, row: any) => (
@@ -83,7 +83,7 @@ export default function EstimatesPage() {
       render: (v: string) => <Badge variant={statusVariant(v)}>{v || '—'}</Badge>,
     },
     {
-      key: 'date', label: 'Date',
+      key: 'date', filter: 'dateRange', label: 'Date',
       render: (v: string) => <span className="text-gray-600">{fmtDate(v)}</span>,
     },
     {

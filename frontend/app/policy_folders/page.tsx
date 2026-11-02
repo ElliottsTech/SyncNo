@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import DataTable from '../../components/DataTable';
+import DataTable, { type Column } from '../../components/DataTable';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
 import { usePageTitle } from '../../lib/usePageTitle';
@@ -33,7 +33,7 @@ export default function PolicyFoldersPage() {
 
   useEffect(() => { fetchRows(); }, [fetchRows]);
 
-  const columns = [
+  const columns: Column[] = [
     {
       key: 'name', label: 'Name',
       render: (v, row) => <Link href={`/policy_folders/${row.id}`} className="text-blue-600 hover:underline font-medium">{v || '(no name)'}</Link>,
@@ -49,7 +49,7 @@ export default function PolicyFoldersPage() {
       render: (v, row) => <Link href={`/policy_folders/${row.id}`} className="text-blue-600 hover:underline">{v || 0}</Link>,
     },
     { key: 'effective_policy_id', label: 'Effective Policy', render: v => v || <span className="text-gray-400">—</span> },
-    { key: 'created_at', label: 'Created', render: v => v ? new Date(v).toLocaleDateString() : '' },
+    { key: 'created_at', filter: 'dateRange', label: 'Created', render: v => v ? new Date(v).toLocaleDateString() : '' },
   ];
 
   return (

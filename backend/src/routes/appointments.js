@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getDb } from '../db/database.js';
+import { addDateRange } from '../lib/dateRangeFilter.js';
 
 const router = Router();
 
@@ -35,6 +36,10 @@ router.get('/', (req, res) => {
     conditions.push('ticket_id = ?');
     params.push(Number(filter_ticket_id));
   }
+  addDateRange(conditions, params, req.query, 'created_at');
+  addDateRange(conditions, params, req.query, 'start_at');
+  addDateRange(conditions, params, req.query, 'end_at');
+
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
   const sortExprs = {

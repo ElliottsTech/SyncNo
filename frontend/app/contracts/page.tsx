@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import DataTable from '../../components/DataTable';
+import DataTable, { type Column } from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
@@ -34,15 +34,15 @@ export default function ContractsPage() {
 
   useEffect(() => { fetchRows(); }, [fetchRows]);
 
-  const columns = [
+  const columns: Column[] = [
     {
       key: 'name', label: 'Name',
       render: (v, row) => <Link href={`/contracts/${row.id}`} className="text-blue-600 hover:underline font-medium">{v}</Link>,
     },
     { key: 'status', label: 'Status', render: v => v ? <Badge>{v}</Badge> : '' },
     { key: 'contract_amount', label: 'Amount', render: v => v ? `$${parseFloat(v).toFixed(2)}` : '—' },
-    { key: 'start_date', label: 'Start', render: v => v ? new Date(v).toLocaleDateString() : '' },
-    { key: 'end_date', label: 'End', render: v => v ? new Date(v).toLocaleDateString() : '' },
+    { key: 'start_date', filter: 'dateRange', label: 'Start', render: v => v ? new Date(v).toLocaleDateString() : '' },
+    { key: 'end_date', filter: 'dateRange', label: 'End', render: v => v ? new Date(v).toLocaleDateString() : '' },
     { key: 'likelihood', label: 'Likelihood' },
   ];
 

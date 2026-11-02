@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import DataTable from '../../components/DataTable';
+import DataTable, { type Column } from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
@@ -101,7 +101,7 @@ export default function TicketsPage() {
     return { open, newCount, overdue, high };
   }, [tickets]);
 
-  const columns = [
+  const columns: Column[] = [
     {
       key: 'number',
       label: '#',
@@ -157,7 +157,7 @@ export default function TicketsPage() {
     },
     { key: 'problem_type', label: 'Type' },
     {
-      key: 'updated_at',
+      key: 'updated_at', filter: 'dateRange',
       label: 'Updated',
       render: (v: string) => (
         <span title={v ? new Date(v).toLocaleString() : ''} className="text-gray-600">
@@ -166,7 +166,7 @@ export default function TicketsPage() {
       ),
     },
     {
-      key: 'due_date',
+      key: 'due_date', filter: 'dateRange',
       label: 'Due',
       render: (v: string, row: any) => {
         if (!v) return <span className="text-gray-400">—</span>;
@@ -182,7 +182,7 @@ export default function TicketsPage() {
       },
     },
     {
-      key: 'created_at',
+      key: 'created_at', filter: 'dateRange',
       label: 'Created',
       render: (v: string) => (
         <span title={v ? new Date(v).toLocaleString() : ''} className="text-gray-600">

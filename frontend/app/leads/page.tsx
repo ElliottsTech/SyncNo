@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import DataTable from '../../components/DataTable';
+import DataTable, { type Column } from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
@@ -34,7 +34,7 @@ export default function LeadsPage() {
 
   useEffect(() => { fetchRows(); }, [fetchRows]);
 
-  const columns = [
+  const columns: Column[] = [
     {
       key: 'name', label: 'Name', sortable: true,
       render: (v, row) => (
@@ -55,7 +55,7 @@ export default function LeadsPage() {
       ) : '',
     },
     { key: 'mailbox_name', label: 'Mailbox', sortable: true },
-    { key: 'created_at', label: 'Created', sortable: true, render: v => v ? new Date(v).toLocaleDateString() : '' },
+    { key: 'created_at', filter: 'dateRange', label: 'Created', sortable: true, render: v => v ? new Date(v).toLocaleDateString() : '' },
   ];
 
   return (

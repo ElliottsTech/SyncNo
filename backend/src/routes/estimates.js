@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getDb } from '../db/database.js';
+import { addDateRange } from '../lib/dateRangeFilter.js';
 
 const router = Router();
 
@@ -37,6 +38,8 @@ router.get('/', (req, res) => {
   if (filter_status) { conditions.push('e.status LIKE ?'); params.push(`%${filter_status}%`); }
   if (filter_date) { conditions.push('e.date LIKE ?'); params.push(`%${filter_date}%`); }
   if (filter_total) { conditions.push('CAST(e.total AS TEXT) LIKE ?'); params.push(`%${filter_total}%`); }
+
+  addDateRange(conditions, params, req.query, 'date');
 
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   // Map each whitelisted sort key to its SQL expression. `total` is stored as

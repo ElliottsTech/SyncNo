@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import DataTable from '../../components/DataTable';
+import DataTable, { type Column } from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
@@ -34,7 +34,7 @@ export default function SchedulesPage() {
 
   useEffect(() => { fetchRows(); }, [fetchRows]);
 
-  const columns = [
+  const columns: Column[] = [
     {
       key: 'name', label: 'Name',
       render: (v, row) => <Link href={`/schedules/${row.id}`} className="text-blue-600 hover:underline font-medium">{v || '(no name)'}</Link>,
@@ -42,8 +42,8 @@ export default function SchedulesPage() {
     { key: 'status', label: 'Status', render: v => v ? <Badge>{v}</Badge> : '' },
     { key: 'amount', label: 'Amount', render: v => v ? `$${parseFloat(v).toFixed(2)}` : '—' },
     { key: 'frequency', label: 'Frequency' },
-    { key: 'next_date', label: 'Next', render: v => v ? new Date(v).toLocaleDateString() : '' },
-    { key: 'end_date', label: 'Ends', render: v => v ? new Date(v).toLocaleDateString() : '' },
+    { key: 'next_date', filter: 'dateRange', label: 'Next', render: v => v ? new Date(v).toLocaleDateString() : '' },
+    { key: 'end_date', filter: 'dateRange', label: 'Ends', render: v => v ? new Date(v).toLocaleDateString() : '' },
   ];
 
   return (

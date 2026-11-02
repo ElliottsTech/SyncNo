@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { getDb } from '../db/database.js';
 import { fetchPoAttachments, SyncroSessionExpired, getWebSessionCredentials } from '../lib/syncroSession.js';
+import { addDateRange } from '../lib/dateRangeFilter.js';
 
 const router = Router();
 
@@ -59,6 +60,9 @@ router.get('/', (req, res) => {
     conditions.push('due_date LIKE ?');
     params.push(`%${filter_due_date}%`);
   }
+
+  addDateRange(conditions, params, req.query, 'created_at');
+  addDateRange(conditions, params, req.query, 'due_date');
 
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { getDb } from '../db/database.js';
 import fs from 'fs';
 import path from 'path';
+import { addDateRange } from '../lib/dateRangeFilter.js';
 
 const router = Router();
 
@@ -59,6 +60,10 @@ router.get('/', (req, res) => {
     conditions.push('priority LIKE ?');
     params.push(`%${filter_priority}%`);
   }
+
+  addDateRange(conditions, params, req.query, 'created_at');
+  addDateRange(conditions, params, req.query, 'due_date');
+  addDateRange(conditions, params, req.query, 'updated_at');
 
   const whereStr = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 

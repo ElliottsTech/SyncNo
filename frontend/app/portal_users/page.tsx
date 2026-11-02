@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import DataTable from '../../components/DataTable';
+import DataTable, { type Column } from '../../components/DataTable';
 import Badge from '../../components/Badge';
 import Pagination from '../../components/Pagination';
 import { useListState } from '../../lib/useUrlState';
@@ -34,14 +34,14 @@ export default function PortalUsersPage() {
 
   useEffect(() => { fetchRows(); }, [fetchRows]);
 
-  const columns = [
+  const columns: Column[] = [
     {
       key: 'email', label: 'Email',
       render: (v, row) => <Link href={`/portal_users/${row.id}`} className="text-blue-600 hover:underline font-medium">{v}</Link>,
     },
     { key: 'mobile', label: 'Mobile' },
     { key: 'disabled', label: 'Status', render: v => v ? <Badge variant="danger">Disabled</Badge> : <Badge variant="success">Active</Badge> },
-    { key: 'created_at', label: 'Created', render: v => v ? new Date(v).toLocaleDateString() : '' },
+    { key: 'created_at', filter: 'dateRange', label: 'Created', render: v => v ? new Date(v).toLocaleDateString() : '' },
   ];
 
   return (
