@@ -4064,11 +4064,20 @@ async function runScheduledSync(entity) {
     console.error(`scheduled sync ${entity}: Syncro not configured`);
     return;
   }
-  // Skip if already running
+  // Skip if already running — but a non-idle phase with no live runner is an
+  // orphaned checkpoint (a runner that died mid-phase, e.g. after catalog).
+  // Heal it instead of skipping forever — same policy as POST /trigger.
   const state = getSyncState(entity);
   if (state.phase !== 'idle' && state.phase !== 'error') {
-    console.log(`scheduled sync ${entity}: already running (phase=${state.phase}), skipping`);
-    return;
+    if (!liveSyncs.has(entity) && !liveSyncs.has('all')) {
+      console.log(`scheduled sync ${entity}: healing orphaned phase=${state.phase}`);
+      state.phase = 'idle';
+      state.last_result_error = null;
+      saveSyncState(state);
+    } else {
+      console.log(`scheduled sync ${entity}: already running (phase=${state.phase}), skipping`);
+      return;
+    }
   }
   const syncId = entity;
   syncAbort.delete(syncId);
