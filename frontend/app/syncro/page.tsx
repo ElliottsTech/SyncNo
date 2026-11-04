@@ -30,6 +30,7 @@ type LastResult = {
   last_sync: string | null;
   total_to_sync: number;
   db_count: number;
+  db_detail_count: number | null;
   pause_attempt: number;
   last_pause_until: string | null;
 };
@@ -203,7 +204,7 @@ export default function SyncroPage() {
   );
 
   const [lastResults, setLastResults] = useState<Record<Phase, LastResult>>(
-    () => Object.fromEntries(ENTITY_PHASES.map(p => [p, { count: 0, error: null, last_sync: null, total_to_sync: 0, db_count: 0, pause_attempt: 0, last_pause_until: null }])) as Record<Phase, LastResult>
+    () => Object.fromEntries(ENTITY_PHASES.map(p => [p, { count: 0, error: null, last_sync: null, total_to_sync: 0, db_count: 0, db_detail_count: null, pause_attempt: 0, last_pause_until: null }])) as Record<Phase, LastResult>
   );
 
   const [syncAllSyncing, setSyncAllSyncing] = useState(false);
@@ -571,7 +572,7 @@ export default function SyncroPage() {
       .then(r => r.json())
       .then(data => {
         setLastResults(
-          Object.fromEntries(ENTITY_PHASES.map(p => [p, data[p] || { count: 0, error: null, last_sync: null, total_to_sync: 0, db_count: 0, pause_attempt: 0, last_pause_until: null }])) as Record<Phase, LastResult>
+          Object.fromEntries(ENTITY_PHASES.map(p => [p, data[p] || { count: 0, error: null, last_sync: null, total_to_sync: 0, db_count: 0, db_detail_count: null, pause_attempt: 0, last_pause_until: null }])) as Record<Phase, LastResult>
         );
       })
       .catch(() => {});
@@ -1481,6 +1482,16 @@ export default function SyncroPage() {
 
             {/* Individual entity sync rows */}
             <div className="grid grid-cols-1 gap-2 mb-4">
+              {/* Column headers — mirrors the row layout below */}
+              <div className="flex flex-wrap items-center gap-2 pb-1 border-b border-gray-200">
+                <span className="w-4" />
+                <span className="text-xs uppercase tracking-wide text-gray-400 font-semibold w-40">Entity (Syncro count)</span>
+                <span className="px-3 text-xs uppercase tracking-wide text-gray-400 font-semibold">Actions</span>
+                <div className="ml-auto flex items-center gap-2">
+                  <span className="text-xs uppercase tracking-wide text-gray-400 font-semibold text-right" style={{ minWidth: 130 }}>In DB (detailed)</span>
+                  <span className="text-xs uppercase tracking-wide text-gray-400 font-semibold text-right" style={{ minWidth: 70 }}>Last run</span>
+                </div>
+              </div>
               {visiblePhases.map(phase => {
                 const syncing = !!activeSyncs[`entity:${phase}`];
                 const progress = entityStatus[phase] || syncAllProgress[phase];
@@ -1606,20 +1617,41 @@ export default function SyncroPage() {
                     )}
                     {/* Right-aligned group: [DB count] [last-sync count] */}
                     <div className="ml-auto flex items-center gap-2">
-                      {/* DB count — total records of this type currently in DB (left of last-sync) */}
+                      {/* DB count — rows in the local table. Two-part syncs (catalog +
+                          detail) show how many rows have their detail synced until it
+                          catches up to the row count, then collapse to the plain count. */}
                       {lastResults[phase].db_count > 0 && (
-                        <span className="text-xs text-gray-500 font-mono" title="Records in DB">
-                          DB:{lastResults[phase].db_count.toLocaleString()}
-                        </span>
+                        (() => {
+                          const d = lastResults[phase].db_detail_count;
+                          const total = lastResults[phase].db_count;
+                          const partial = d != null && d < total;
+                          return partial ? (
+                            <span
+                              className="text-xs text-amber-600 font-mono text-right"
+                              style={{ minWidth: 130 }}
+                              title={`${d.toLocaleString()} of ${total.toLocaleString()} records have details synced (catalog complete, detail phase pending)`}
+                            >
+                              DB:{total.toLocaleString()} · {d.toLocaleString()} det.
+                            </span>
+                          ) : (
+                            <span
+                              className="text-xs text-gray-500 font-mono text-right"
+                              style={{ minWidth: 130 }}
+                              title="Records in DB (details synced)"
+                            >
+                              DB:{total.toLocaleString()}
+                            </span>
+                          );
+                        })()
                       )}
                       {!progress && lastResults[phase].error === 'cancelled' && (
-                        <span className="text-xs text-orange-500">Cancelled ({lastResults[phase].count})</span>
+                        <span className="text-xs text-orange-500 text-right" style={{ minWidth: 70 }}>Cancelled ({lastResults[phase].count})</span>
                       )}
                       {!progress && lastResults[phase].error && lastResults[phase].error !== 'cancelled' && (
-                        <span className="text-xs text-red-500">✗ {lastResults[phase].error}</span>
+                        <span className="text-xs text-red-500 text-right" style={{ minWidth: 70 }}>✗ {lastResults[phase].error}</span>
                       )}
                       {!progress && !lastResults[phase].error && lastResults[phase].count > 0 && (
-                        <span className="text-xs text-green-600">✓ {lastResults[phase].count}</span>
+                        <span className="text-xs text-green-600 text-right" style={{ minWidth: 70 }}>✓ {lastResults[phase].count}</span>
                       )}
                     </div>
                   </div>

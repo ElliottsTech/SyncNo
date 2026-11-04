@@ -318,23 +318,32 @@ router.get('/last-results', (req, res) => {
   for (const ent of entities) {
     const state = getSyncState(ent);
     let dbCount = 0;
+    // Detail-phase completion count for two-part (catalog + detail) syncs.
+    // tickets tracks it explicitly via has_detail (rows land at 0 from catalog,
+    // flip to 1 when detailed); most other tables carry a synced flag set on
+    // the detail insert. Null when the table has neither → UI shows plain count.
+    let dbDetailCount = null;
     try {
       // Entity name matches table name for all current entities.
       // Worksheet_results is derived from tickets — count tickets instead.
       // serial_po_links isn't a table — count linked serials instead.
       // po_attachments_syncro isn't a table — count POs with synced attachments.
-      if (ent === 'worksheet_results') {
-        const row = db.prepare('SELECT COUNT(*) as n FROM tickets').get();
-        dbCount = row.n || 0;
-      } else if (ent === 'serial_po_links') {
+      const table = ent === 'worksheet_results' ? 'tickets' : ent;
+      if (ent === 'serial_po_links') {
         const r = db.prepare('SELECT COUNT(*) as n FROM product_serials WHERE po_id > 0').get();
         dbCount = r.n || 0;
       } else if (ent === 'po_attachments_syncro') {
         const r = db.prepare('SELECT COUNT(*) as n FROM purchase_orders WHERE attachments_synced_at IS NOT NULL').get();
         dbCount = r.n || 0;
       } else {
-        const row = db.prepare(`SELECT COUNT(*) as n FROM "${ent}"`).get();
+        const row = db.prepare(`SELECT COUNT(*) as n FROM "${table}"`).get();
         dbCount = row.n || 0;
+        const cols = db.prepare(`PRAGMA table_info("${table}")`).all().map(c => c.name);
+        if (cols.includes('has_detail')) {
+          dbDetailCount = db.prepare(`SELECT COUNT(*) as n FROM "${table}" WHERE has_detail = 1`).get().n || 0;
+        } else if (cols.includes('synced')) {
+          dbDetailCount = db.prepare(`SELECT COUNT(*) as n FROM "${table}" WHERE synced = 1`).get().n || 0;
+        }
       }
     } catch (_) {}
     results[ent] = {
@@ -343,6 +352,7 @@ router.get('/last-results', (req, res) => {
       last_sync: state.last_sync || null,
       total_to_sync: state.total_to_sync || 0,
       db_count: dbCount,
+      db_detail_count: dbDetailCount,
       pause_attempt: state.pause_attempt || 0,
       last_pause_until: state.last_pause_until || null,
     };
