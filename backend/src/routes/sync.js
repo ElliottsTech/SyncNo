@@ -1480,7 +1480,9 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
     // detail_total = tickets in DB the detail phase will actually fetch.
     // Initial/forceAll sync fetches everything; delta skips Resolved — except
     // for tickets that were never detailed (the red rows).
-    const detailResolvedClause = detailFilterClause;
+    // (Compute locally — detailFilterClause lives in syncTickets' scope; these
+    // helpers are separate functions and referencing it threw ReferenceError.)
+    const detailResolvedClause = isInitialSync ? '' : "AND (status != 'Resolved' OR has_detail = 0)";
     const row = db.prepare(`SELECT COUNT(*) as cnt FROM tickets WHERE deleted_at IS NULL ${detailResolvedClause}`).get();
     state.detail_total = row.cnt;
     state.detail_cursor = null;
@@ -1537,7 +1539,7 @@ async function runSync(entitiesToRun, forceAll, apiKey, subdomain, res, syncId, 
 
       // Build query. Initial/forceAll re-fetches everything; delta skips Resolved
       // (except for tickets that were never detailed — the red rows).
-      const detailResolvedClause = detailFilterClause;
+      const detailResolvedClause = isInitialSync ? '' : "AND (status != 'Resolved' OR has_detail = 0)";
       let query, params;
       if (!cursor) {
         query = `SELECT id, status FROM tickets WHERE deleted_at IS NULL ${detailResolvedClause} ORDER BY id ASC`;
