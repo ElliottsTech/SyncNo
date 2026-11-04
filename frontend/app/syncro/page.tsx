@@ -1492,13 +1492,13 @@ export default function SyncroPage() {
                   <span className="text-xs uppercase tracking-wide text-gray-400 font-semibold text-right" style={{ width: 70 }}>Last run</span>
                 </div>
               </div>
-              {visiblePhases.map(phase => {
+              {visiblePhases.map((phase, idx) => {
                 const syncing = !!activeSyncs[`entity:${phase}`];
                 const progress = entityStatus[phase] || syncAllProgress[phase];
                 const isRunning = syncing;
 
                 return (
-                  <div key={phase} className="flex flex-wrap items-center gap-2">
+                  <div key={phase} className={`flex flex-wrap items-center gap-2 px-2 -mx-2 rounded ${idx % 2 === 1 ? 'bg-gray-50' : ''}`}>
                     <span className={`text-sm w-4 text-center ${phaseColor(progress)}`}>
                       {phaseIcon(progress)}
                     </span>
