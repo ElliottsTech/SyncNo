@@ -296,8 +296,14 @@ export default function SyncroPage() {
           const backendProgress = Object.fromEntries(
             ENTITY_PHASES.map(p => [p, buildProgressFromState(p, data[p])])
           ) as Record<Phase, PhaseProgress>;
-          // Prefer sessionStorage progress if available, otherwise use backend state (never null)
-          const mergedProgress = storedProgress || backendProgress;
+          // Fresh backend state wins; sessionStorage only fills gaps for entities
+          // the backend isn't reporting — it can hold stale counts from a prior run.
+          const mergedProgress = { ...backendProgress };
+          if (storedProgress) {
+            for (const p of ENTITY_PHASES) {
+              if (!mergedProgress[p] && storedProgress[p]) mergedProgress[p] = storedProgress[p];
+            }
+          }
           setSyncAllProgress(mergedProgress);
           saveSyncProgress(mergedProgress);
 
@@ -323,6 +329,19 @@ export default function SyncroPage() {
                 if (p) restoredStatus[phase as Phase] = p;
               }
             }
+          }
+          // Syncs started outside this browser (scheduler / API trigger) have no
+          // sessionStorage entry — synthesize an active tab for each running
+          // entity so it shows as Active, the Terminal button works (it polls
+          // /api/sync/events itself), and per-entity progress is seeded live.
+          for (const p of ENTITY_PHASES) {
+            const st = data[p];
+            if (!st || !st.phase || st.phase === 'idle' || st.phase === 'error') continue;
+            const key = `entity:${p}`;
+            if (restored[key] || restored[`${key}:force`]) continue;
+            restored[key] = { phase: p as any, xhr: null, buffer: '', storedEvents: [] };
+            const pr = buildProgressFromState(p, st);
+            if (pr) restoredStatus[p] = pr;
           }
           if (Object.keys(restored).length > 0) {
             setActiveSyncs(restored);
